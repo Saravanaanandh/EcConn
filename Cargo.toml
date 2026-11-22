@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["server", "client", "common"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+
+[profile.release]
+# Keep symbols so a profiler/backtrace is still useful while prototyping.
+debug = 1

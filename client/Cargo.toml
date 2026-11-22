@@ -1,0 +1,15 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+common = { path = "../common" }
+
+[dependencies.sdl2]
+version = "0.39"
+# Build SDL2 from source so no system SDL2 install is needed on Windows.
+# On Linux Mint the distro's libsdl2-dev is used unless this is enabled.
+features = ["bundled"]

@@ -1,0 +1,250 @@
+//! M2 server: capture the primary monitor, encode H.264, send over UDP.
+//!
+//! ```text
+//! cargo run -p server --release -- --dest 127.0.0.1:9100
+//! ```
+//!
+//! Flags:
+//!   `--dest <ip:port>` (default 127.0.0.1:9100, where video is sent)
+//!   `--bind <ip:port>` (default 0.0.0.0:9000, also receives keyframe requests)
+//!   `--seconds <n>` (default 0 = run until Ctrl+C)
+//!   `--width <W>` (default 1280, encode/stream width)
+//!   `--height <H>` (default 720, encode/stream height)
+//!   `--fps <n>` (default 30, frames per second)
+//!   `--encode-path <name>` (default "auto", auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)
+//!   `--help` (print this help message)
+mod capture;
+mod encoder;
+mod net;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+use common::{DEFAULT_CLIENT_PORT, DEFAULT_SERVER_PORT};
+
+use crate::encoder::{EncodedFrame, Encoder};
+use crate::net::NetSender;
+
+fn print_help() {
+    eprintln!(
+        "lowlat-screen server usage:\n\
+         --dest <ip:port>       Destination address for UDP video (default: 127.0.0.1:9100)\n\
+         --bind <ip:port>       Local bind address for UDP (default: 0.0.0.0:9000)\n\
+         --seconds <n>          Run for n seconds, 0 = forever (default: 0)\n\
+         --width <W>            Encode/stream width in pixels (default: 1280)\n\
+         --height <H>           Encode/stream height in pixels (default: 720)\n\
+         --fps <n>              Frames per second (default: 30)\n\
+         --encode-path <name>   Video encoder path (default: auto, auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)\n\
+         --help                 Print this help message"
+    );
+}
+
+fn value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+fn run() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Print help if requested
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        std::process::exit(0);
+    }
+
+    let dest: SocketAddr = value(&args, "--dest")
+        .unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_CLIENT_PORT}"))
+        .parse()
+        .context("--dest must look like 192.168.50.2:9100")?;
+    let bind: SocketAddr = value(&args, "--bind")
+        .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_SERVER_PORT}"))
+        .parse()
+        .context("--bind must look like 0.0.0.0:9000")?;
+
+    // M3 flags: encode resolution and fps
+    let width: u32 = value(&args, "--width")
+        .unwrap_or_else(|| "1280".to_string())
+        .parse()
+        .context("--width must be a positive integer")?;
+    let height: u32 = value(&args, "--height")
+        .unwrap_or_else(|| "720".to_string())
+        .parse()
+        .context("--height must be a positive integer")?;
+    let fps: u32 = value(&args, "--fps")
+        .unwrap_or_else(|| "30".to_string())
+        .parse()
+        .context("--fps must be a positive integer")?;
+
+    // Runtime duration flag: 0 = run forever (default).
+    let seconds: u64 = value(&args, "--seconds")
+        .unwrap_or_else(|| "0".to_string())
+        .parse()
+        .context("--seconds must be a number")?;
+
+    // Encoder path: if user specified --encode-path, use it directly;
+    // otherwise auto-detect.
+    let encode_path = value(&args, "--encode-path");
+    let encode_path = match encode_path {
+        Some(path) => path,
+        None => "auto".to_string(),
+    };
+
+    // Capture size is always 1920x1080 from Desktop Duplication
+    let capture_width = 1920u32;
+    let capture_height = 1080u32;
+    let need_scale = (width != capture_width) || (height != capture_height);
+
+    // Runtime diagnostics: show exactly which ports the processes are using.
+    println!(
+        "server: bind {bind}, sending to {dest}, {fps} fps target (keyframe listener on {bind})"
+    );
+
+    // Also print the client-facing ports for the peer test.
+    println!("server_ports: bind={bind} dest={dest}");
+
+    // Print capture/encode size info - ONE consistent line
+    println!(
+        "capture {}x{}, encoding {}x{}",
+        capture_width,
+        capture_height,
+        width,
+        height
+    );
+    if need_scale {
+        println!(
+            "scaling from capture size to encode size via ffmpeg -vf scale={}:{}",
+            width, height
+        );
+    }
+
+    let (frames_tx, frames_rx) = sync_channel::<EncodedFrame>(2);
+    let force_keyframe = Arc::new(AtomicBool::new(false));
+    let net = NetSender::new(bind, dest)?.spawn(frames_rx, force_keyframe.clone());
+
+    let mut capture = capture::Capture::new()?;
+
+    let mut encoder = Encoder::new(
+        width,
+        height,
+        fps,
+        frames_tx.clone(),
+        &encode_path,
+        need_scale,
+    )?;
+    println!("streaming - press Ctrl+C to stop");
+
+    let start = Instant::now();
+    let limit = (seconds > 0).then(|| Duration::from_secs(seconds));
+    let mut copy_ms: Vec<f32> = Vec::new();
+    let mut wait_ms: Vec<f32> = Vec::new();
+    let mut encode_ms: Vec<f32> = Vec::new();
+    let mut frames_written = 0u64;
+    let mut new_frames = 0u64;
+    let mut restarts = 0u64;
+    let mut last_report = Instant::now();
+    // Absolute deadlines, so a slow frame is paid back over the next ones
+    // instead of stretching every frame by its own cost.
+    let mut next_deadline = start + Duration::from_secs_f64(1.0 / fps as f64);
+
+    loop {
+        if let Some(limit) = limit {
+            if start.elapsed() >= limit {
+                break;
+            }
+        }
+
+        // A restart gives us a fresh IDR with SPS/PPS, which is how the child
+        // process serves keyframe requests. It costs ~100-300 ms of stream.
+        if force_keyframe.swap(false, Ordering::Relaxed) {
+            restarts += 1;
+            encoder.finish()?;
+            encoder = Encoder::new(
+                width,
+                height,
+                fps,
+                frames_tx.clone(),
+                &encode_path,
+                need_scale,
+            )?;
+            println!("restarted encoder for keyframe request #{restarts}");
+            // Do not try to make up the time the restart consumed.
+            next_deadline = Instant::now() + Duration::from_secs_f64(1.0 / fps as f64);
+        }
+
+        let now = Instant::now();
+        if now >= next_deadline {
+            // Behind schedule: skip the slots we already missed.
+            let behind = now.duration_since(next_deadline).as_secs_f64();
+            let missed = (behind / Duration::from_secs_f64(1.0 / fps as f64).as_secs_f64()) as u32 + 1;
+            next_deadline += Duration::from_secs_f64(1.0 / fps as f64) * missed;
+        }
+
+        let frame_started = Instant::now();
+        let timeout = next_deadline.saturating_duration_since(frame_started);
+        let acquired = capture.acquire(timeout.as_millis().max(1) as u32)?;
+        if acquired.new_frame {
+            new_frames += 1;
+        }
+
+        let encode_started = Instant::now();
+        encoder.write_frame(capture.frame())?;
+        let this_encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
+
+        copy_ms.push((acquired.copy.as_secs_f64() * 1000.0) as f32);
+        wait_ms.push((acquired.wait.as_secs_f64() * 1000.0) as f32);
+        encode_ms.push(this_encode_ms as f32);
+        frames_written += 1;
+
+        let rest = next_deadline.saturating_duration_since(Instant::now());
+        if !rest.is_zero() {
+            std::thread::sleep(rest);
+        }
+        next_deadline += Duration::from_secs_f64(1.0 / fps as f64);
+
+        if last_report.elapsed() >= Duration::from_secs(1) {
+            println!(
+                "[{:>3}s] frames={:<5} new={:<4} capture copy avg {:>5.2} ms | wait avg {:>5.2} ms | encode submit avg {:>5.2} ms",
+                start.elapsed().as_secs(),
+                frames_written,
+                new_frames,
+                avg(&copy_ms),
+                avg(&wait_ms),
+                avg(&encode_ms),
+            );
+            copy_ms.clear();
+            wait_ms.clear();
+            encode_ms.clear();
+            last_report = Instant::now();
+        }
+    }
+
+    encoder.finish()?;
+    drop(frames_tx); // lets the udp sender drain and exit
+    let _ = net.join();
+
+    println!(
+        "done: {frames_written} frames written to the encoder, {restarts} encoder restarts"
+    );
+    Ok(())
+}
+
+fn avg(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f32>() / values.len() as f32
+    }
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("error: {err:#}");
+        std::process::exit(1);
+    }
+}
