@@ -75,6 +75,9 @@ impl Partial {
 pub struct Receiver {
     socket: UdpSocket,
     server: SocketAddr,
+    width: u32,
+    height: u32,
+    config_tx: std::sync::mpsc::SyncSender<(u32, u32, u16, u8)>,
     partial: HashMap<u32, Partial>,
     /// Highest frame id we have finished with (submitted or deliberately
     /// dropped). Anything at or below it is too late to be useful.
@@ -91,6 +94,9 @@ impl Receiver {
     pub fn new(
         bind: SocketAddr,
         server: SocketAddr,
+        width: u32,
+        height: u32,
+        config_tx: std::sync::mpsc::SyncSender<(u32, u32, u16, u8)>,
         stats: Arc<Stats>,
         running: Arc<AtomicBool>,
     ) -> Result<Self> {
@@ -105,6 +111,9 @@ impl Receiver {
         Ok(Self {
             socket,
             server,
+            width,
+            height,
+            config_tx,
             partial: HashMap::new(),
             newest_done: None,
             awaiting_keyframe: true,
@@ -141,13 +150,13 @@ impl Receiver {
             .name("udp-receiver".into())
             .spawn(move || {
                 let mut decoder = decoder;
-                self.run(&decoder);
+                self.run(&mut decoder);
                 decoder.shutdown();
             })
             .expect("spawning the udp receiver thread failed")
     }
 
-    fn run(mut self, decoder: &Decoder) {
+    fn run(mut self, decoder: &mut Decoder) {
         let mut datagram = [0u8; 2048];
         // We join mid-GOP at best: ask for a keyframe right away.
         self.request_keyframe();
@@ -176,12 +185,36 @@ impl Receiver {
         }
     }
 
-    fn handle_datagram(&mut self, datagram: &[u8], decoder: &Decoder) {
+    fn handle_datagram(&mut self, datagram: &[u8], decoder: &mut Decoder) {
         let Some(header) = FrameHeader::decode(datagram) else {
             return;
         };
         if header.is_keyframe_request() {
             return;
+        }
+
+        // Check for DisplayConfig control datagram from server
+        if header.flags == 0 && header.frame_id == 0 && header.packet_count == 1 && header.payload_len >= 24 {
+            let payload = &datagram[HEADER_LEN..HEADER_LEN + header.payload_len as usize];
+            if let Some((msg, _, _)) = common::input_msg_decode(payload) {
+                if msg == common::InputMsg::DisplayConfig {
+                    if let Some((w, h, orient, rot)) = common::display_config_decode(payload) {
+                        if w != self.width || h != self.height {
+                            println!("client: server display config changed to {w}x{h} (orientation {orient}°, rotation {rot})");
+                            if let Err(err) = decoder.reset(w, h) {
+                                eprintln!("resetting decoder failed: {err:#}");
+                            }
+                            self.width = w;
+                            self.height = h;
+                            self.partial.clear();
+                            self.awaiting_keyframe = true;
+                            self.request_keyframe();
+                            let _ = self.config_tx.send((w, h, orient, rot));
+                        }
+                        return;
+                    }
+                }
+            }
         }
         if header.packet_count == 0
             || header.packet_count > MAX_PACKETS_PER_FRAME
@@ -378,6 +411,13 @@ impl InputSender {
     /// SDL scancode (must fit in 7 bits); `up` sets bit 7 of the payload.
     pub fn key(&mut self, scancode: u8, up: bool) -> Result<()> {
         self.send(InputMsg::Key, &[scancode | if up { 0x80 } else { 0 }])
+    }
+
+    /// Request monitor orientation change from the server (0, 90, 180, 270 degrees).
+    pub fn set_orientation(&mut self, orientation: u16) -> Result<()> {
+        let mut data = [0u8; 4];
+        data[..2].copy_from_slice(&orientation.to_be_bytes());
+        self.send(InputMsg::SetOrientation, &data)
     }
 
     /// Release every held key and button on the server.

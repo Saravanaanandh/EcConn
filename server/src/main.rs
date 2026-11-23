@@ -27,9 +27,11 @@ mod net;
 #[cfg(windows)]
 mod driver_install;
 #[cfg(windows)]
+mod orientation;
+#[cfg(windows)]
 mod virtual_display;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,6 +51,7 @@ fn print_help() {
          --width <W>            Encode/stream width in pixels (default: 1280)\n\
          --height <H>           Encode/stream height in pixels (default: 720)\n\
          --fps <n>              Frames per second (default: 30)\n\
+         --orientation <n>      Display orientation: 0, 90, 180, 270 (default: 0) (M9)\n\
          --encode-path <name>   Video encoder path (default: auto, auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)\n\
          --monitor <index>      DXGI output index to capture (default: 0) (M6)\n\
          --list-monitors        Print each monitor's index, name, resolution, and position, then exit (M6)\n\
@@ -142,6 +145,10 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| "30".to_string())
         .parse()
         .context("--fps must be a positive integer")?;
+    let mut orientation: u16 = value(&args, "--orientation")
+        .unwrap_or_else(|| "0".to_string())
+        .parse()
+        .context("--orientation must be a number (0, 90, 180, 270)")?;
 
     // Runtime duration flag: 0 = run forever (default).
     let seconds: u64 = value(&args, "--seconds")
@@ -208,6 +215,19 @@ fn run() -> Result<()> {
     // Create capture with selected monitor index
     let mut capture = capture::Capture::new(monitor_index)?;
 
+    // Apply initial orientation
+    let monitor_name = capture.name().to_string();
+    let (mut encode_width, mut encode_height) = (width, height);
+    #[cfg(windows)]
+    {
+        let (w, h) = orientation::apply_orientation(&monitor_name, orientation, width, height);
+        encode_width = w;
+        encode_height = h;
+        if orientation != 0 {
+            let _ = capture.force_recreate();
+        }
+    }
+
     // Print capture info - use the actual captured output's resolution
     println!(
         "capture monitor {}: {}x{}",
@@ -215,33 +235,44 @@ fn run() -> Result<()> {
         capture.width(),
         capture.height()
     );
+    println!("capture size: {}x{}", capture.width(), capture.height());
+    println!("encoder size: {}x{}", encode_width, encode_height);
 
     let (frames_tx, frames_rx) = sync_channel::<EncodedFrame>(2);
     let force_keyframe = Arc::new(AtomicBool::new(false));
+    let pending_orientation = Arc::new(AtomicU32::new(0xFFFF));
+    let (config_tx, config_rx) = sync_channel::<(u32, u32, u16, u8, input::MonitorRect)>(4);
     let monitor_rect = input::MonitorRect {
         left: capture.x(),
         top: capture.y(),
-        width: capture.width(),
-        height: capture.height(),
+        width: encode_width,
+        height: encode_height,
     };
-    let net = NetSender::new(bind, dest)?.spawn(frames_rx, force_keyframe.clone(), monitor_rect);
+    let net = NetSender::new(bind, dest)?.spawn(
+        frames_rx,
+        force_keyframe.clone(),
+        pending_orientation.clone(),
+        config_rx,
+        monitor_rect,
+        orientation,
+    );
 
     println!(
         "server: bind {}, sending to {}, {} fps target (keyframe listener on {})",
         bind, dest, fps, bind
     );
 
-    // If --width/--height differ from capture size, we need scaling later
-    let mut need_scale = (width != capture.width()) || (height != capture.height());
+    // If encode_width/encode_height differ from capture size, we need scaling/transpose
+    let mut need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
     if need_scale {
         println!(
             "scaling from capture size {}x{} to encode size {}x{} via ffmpeg -vf scale={}:{}",
             capture.width(),
             capture.height(),
-            width,
-            height,
-            width,
-            height
+            encode_width,
+            encode_height,
+            encode_width,
+            encode_height
         );
     }
 
@@ -249,12 +280,13 @@ fn run() -> Result<()> {
         capture.width(),
         capture.height(),
         capture.pixel_format(),
-        width,
-        height,
+        encode_width,
+        encode_height,
         fps,
         frames_tx.clone(),
         &encode_path,
         need_scale,
+        orientation,
     )?;
 
     println!("streaming - press Ctrl+C to stop");
@@ -281,6 +313,45 @@ fn run() -> Result<()> {
             }
         }
 
+        // Check for runtime orientation change request from client
+        let req_orient = pending_orientation.swap(0xFFFF, Ordering::SeqCst);
+        if req_orient != 0xFFFF {
+            let new_orient = req_orient as u16;
+            #[cfg(windows)]
+            {
+                let (w, h) = orientation::apply_orientation(&capture.name(), new_orient, encode_width, encode_height);
+                encode_width = w;
+                encode_height = h;
+            }
+            orientation = new_orient;
+            println!("orientation changed to {new_orient}°, target size {encode_width}x{encode_height}");
+            let _ = capture.force_recreate();
+            need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
+            encoder.finish()?;
+            encoder = Encoder::new(
+                capture.width(),
+                capture.height(),
+                capture.pixel_format(),
+                encode_width,
+                encode_height,
+                fps,
+                frames_tx.clone(),
+                &encode_path,
+                need_scale,
+                orientation,
+            )?;
+            println!("capture size: {}x{}", capture.width(), capture.height());
+            println!("encoder size: {}x{}", encode_width, encode_height);
+            let new_rect = input::MonitorRect {
+                left: capture.x(),
+                top: capture.y(),
+                width: encode_width,
+                height: encode_height,
+            };
+            let _ = config_tx.send((encode_width, encode_height, orientation, capture.rotation() as u8, new_rect));
+            next_deadline = Instant::now() + Duration::from_secs_f64(1.0 / fps as f64);
+        }
+
         // A restart gives us a fresh IDR with SPS/PPS, which is how the child
         // process serves keyframe requests. It costs ~100-300 ms of stream.
         if force_keyframe.swap(false, Ordering::Relaxed) {
@@ -290,12 +361,13 @@ fn run() -> Result<()> {
                 capture.width(),
                 capture.height(),
                 capture.pixel_format(),
-                width,
-                height,
+                encode_width,
+                encode_height,
                 fps,
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
+                orientation,
             )?;
             println!("restarted encoder for keyframe request #{restarts}");
             // Do not try to make up the time the restart consumed.
@@ -317,24 +389,34 @@ fn run() -> Result<()> {
         // A desktop mode change resizes the capture; ffmpeg was told the old
         // input size, so restart it before feeding the new-sized buffer.
         if capture.take_size_change() {
-            need_scale = (width != capture.width()) || (height != capture.height());
+            need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
             encoder.finish()?;
             encoder = Encoder::new(
                 capture.width(),
                 capture.height(),
                 capture.pixel_format(),
-                width,
-                height,
+                encode_width,
+                encode_height,
                 fps,
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
+                orientation,
             )?;
             println!(
                 "capture is now {}x{}, restarted encoder",
                 capture.width(),
                 capture.height()
             );
+            println!("capture size: {}x{}", capture.width(), capture.height());
+            println!("encoder size: {}x{}", encode_width, encode_height);
+            let new_rect = input::MonitorRect {
+                left: capture.x(),
+                top: capture.y(),
+                width: capture.width(),
+                height: capture.height(),
+            };
+            let _ = config_tx.send((capture.width(), capture.height(), orientation, capture.rotation() as u8, new_rect));
         }
 
         if acquired.new_frame {

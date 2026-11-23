@@ -143,6 +143,56 @@ impl Decoder {
         }
         let _ = self.child.wait();
     }
+
+    /// Reset ffmpeg decoder with a new resolution.
+    pub fn reset(&mut self, width: u32, height: u32) -> Result<()> {
+        self.shutdown();
+        self.shared.shutdown.store(false, Ordering::Relaxed);
+
+        let mut child = Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .args(["-probesize", "32"])
+            .args(["-analyzeduration", "0"])
+            .args(["-flags", "low_delay"])
+            .args(["-f", "h264", "-i", "pipe:0"])
+            .args(["-an"])
+            .args(["-threads", "2"])
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .args(["-s", &format!("{width}x{height}")])
+            .args(["-flush_packets", "1"])
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .context("failed to respawn ffmpeg for decoding")?;
+
+        let stdin = child.stdin.take().context("ffmpeg stdin was not piped")?;
+        let stdout = child.stdout.take().context("ffmpeg stdout was not piped")?;
+
+        let writer = {
+            let shared = self.shared.clone();
+            thread::Builder::new()
+                .name("decoder-input".into())
+                .spawn(move || write_access_units(stdin, shared))
+                .context("spawning the decoder input thread failed")?
+        };
+
+        let reader = {
+            let shared = self.shared.clone();
+            thread::Builder::new()
+                .name("decoder-output".into())
+                .spawn(move || read_raw_frames(stdout, width, height, shared))
+                .context("spawning the decoder output thread failed")?
+        };
+
+        self.child = child;
+        self.threads = vec![writer, reader];
+        Ok(())
+    }
 }
 
 fn next_access_unit(shared: &Shared) -> Option<Vec<u8>> {

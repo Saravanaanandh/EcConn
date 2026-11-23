@@ -32,6 +32,7 @@ pub struct MonitorRect {
 
 pub struct InputInjector {
     rect: MonitorRect,
+    orientation: u16,
     /// Session token; 0 until the first datagram establishes it.
     token: u64,
     last_seq: u16,
@@ -50,6 +51,7 @@ impl InputInjector {
     pub fn new(rect: MonitorRect) -> Self {
         Self {
             rect,
+            orientation: 0,
             token: 0,
             last_seq: 0,
             have_seq: false,
@@ -60,6 +62,16 @@ impl InputInjector {
             injected: 0,
             rejected: 0,
         }
+    }
+
+    /// Update monitor rectangle on resize.
+    pub fn set_rect(&mut self, rect: MonitorRect) {
+        self.rect = rect;
+    }
+
+    /// Update display orientation.
+    pub fn set_orientation(&mut self, orientation: u16) {
+        self.orientation = orientation;
     }
 
     /// Validate and apply one input payload (the bytes after the header).
@@ -97,6 +109,8 @@ impl InputInjector {
             InputMsg::MouseWheel => 15,
             InputMsg::Key => 14,
             InputMsg::ReleaseAll => 14,
+            InputMsg::SetOrientation => 15,
+            InputMsg::DisplayConfig => 24,
         };
         if payload.len() < needed {
             self.rejected += 1;
@@ -110,7 +124,13 @@ impl InputInjector {
             InputMsg::MouseMove => {
                 let x = u16::from_be_bytes([payload[13], payload[14]]);
                 let y = u16::from_be_bytes([payload[15], payload[16]]);
-                self.injected += platform::mouse_move(self.rect, x, y);
+                let (mx, my) = match self.orientation {
+                    90 if self.rect.width > self.rect.height => (y, 65535 - x),
+                    180 => (65535 - x, 65535 - y),
+                    270 if self.rect.width > self.rect.height => (65535 - y, x),
+                    _ => (x, y),
+                };
+                self.injected += platform::mouse_move(self.rect, mx, my);
             }
             InputMsg::MouseBtn => {
                 let mask = payload[13] & 0x07;
@@ -144,6 +164,7 @@ impl InputInjector {
             InputMsg::ReleaseAll => {
                 self.release_all();
             }
+            InputMsg::SetOrientation | InputMsg::DisplayConfig => {}
         }
     }
 

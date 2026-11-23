@@ -1,4 +1,4 @@
-﻿// Shared protocol types for the `lowlat-screen` workspace.
+// Shared protocol types for the `lowlat-screen` workspace.
 
 // Video is sent as one H.264 access unit per frame, split across UDP
 // datagrams. Every datagram carries the fixed 24-byte header below.
@@ -174,6 +174,10 @@ pub enum InputMsg {
     /// Release all pressed keys and mouse buttons (sent on disconnect,
     /// focus loss, or 3 s timeout).
     ReleaseAll = 0x05,
+    /// Client requests an orientation change (0, 90, 180, 270 degrees).
+    SetOrientation = 0x06,
+    /// Server notifies client of current display configuration (width, height, orientation, rotation).
+    DisplayConfig = 0x07,
 }
 
 /// Encode `InputMsg` into `buf`, which must have at least 14 bytes of payload
@@ -184,8 +188,55 @@ pub fn input_msg_encode(msg: InputMsg, seq_id: u16, session_token: u64, buf: &mu
     debug_assert!(buf.len() >= 14);
     buf[0] = msg as u8;
     // bytes 1..3 are reserved (zero-filled)
+    buf[1] = 0;
+    buf[2] = 0;
     buf[3..5].copy_from_slice(&seq_id.to_be_bytes());
     buf[5..13].copy_from_slice(&session_token.to_be_bytes());
+}
+
+/// Encode a SetOrientation request into `buf` (at least 15 bytes of payload).
+pub fn set_orientation_encode(orientation: u16, seq_id: u16, session_token: u64, buf: &mut [u8]) {
+    debug_assert!(buf.len() >= 15);
+    input_msg_encode(InputMsg::SetOrientation, seq_id, session_token, buf);
+    buf[13..15].copy_from_slice(&orientation.to_be_bytes());
+}
+
+/// Decode a SetOrientation payload (requires at least 15 bytes).
+pub fn set_orientation_decode(payload: &[u8]) -> Option<u16> {
+    if payload.len() < 15 {
+        return None;
+    }
+    Some(u16::from_be_bytes([payload[13], payload[14]]))
+}
+
+/// Encode a DisplayConfig notification into `buf` (at least 24 bytes of payload).
+pub fn display_config_encode(
+    width: u32,
+    height: u32,
+    orientation: u16,
+    rotation: u8,
+    seq_id: u16,
+    session_token: u64,
+    buf: &mut [u8],
+) {
+    debug_assert!(buf.len() >= 24);
+    input_msg_encode(InputMsg::DisplayConfig, seq_id, session_token, buf);
+    buf[13..17].copy_from_slice(&width.to_be_bytes());
+    buf[17..21].copy_from_slice(&height.to_be_bytes());
+    buf[21..23].copy_from_slice(&orientation.to_be_bytes());
+    buf[23] = rotation;
+}
+
+/// Decode a DisplayConfig payload (width, height, orientation, rotation).
+pub fn display_config_decode(payload: &[u8]) -> Option<(u32, u32, u16, u8)> {
+    if payload.len() < 24 {
+        return None;
+    }
+    let width = u32::from_be_bytes([payload[13], payload[14], payload[15], payload[16]]);
+    let height = u32::from_be_bytes([payload[17], payload[18], payload[19], payload[20]]);
+    let orientation = u16::from_be_bytes([payload[21], payload[22]]);
+    let rotation = payload[23];
+    Some((width, height, orientation, rotation))
 }
 
 /// Decode an input datagram's payload. Returns `None` if the payload is too
@@ -209,6 +260,8 @@ impl TryFrom<u8> for InputMsg {
             0x03 => Ok(InputMsg::MouseWheel),
             0x04 => Ok(InputMsg::Key),
             0x05 => Ok(InputMsg::ReleaseAll),
+            0x06 => Ok(InputMsg::SetOrientation),
+            0x07 => Ok(InputMsg::DisplayConfig),
             _ => Err(()),
         }
     }
@@ -238,6 +291,31 @@ mod tests {
     fn input_msg_try_from() {
         assert_eq!(InputMsg::try_from(0x01), Ok(InputMsg::MouseMove));
         assert_eq!(InputMsg::try_from(0x05), Ok(InputMsg::ReleaseAll));
+        assert_eq!(InputMsg::try_from(0x06), Ok(InputMsg::SetOrientation));
+        assert_eq!(InputMsg::try_from(0x07), Ok(InputMsg::DisplayConfig));
         assert_eq!(InputMsg::try_from(0xFF), Err(()));
+    }
+
+    #[test]
+    fn orientation_messages_roundtrip() {
+        let mut buf = [0u8; 32];
+        set_orientation_encode(90, 10, 0x1234, &mut buf);
+        let (msg, seq, token) = input_msg_decode(&buf).unwrap();
+        assert_eq!(msg, InputMsg::SetOrientation);
+        assert_eq!(seq, 10);
+        assert_eq!(token, 0x1234);
+        assert_eq!(set_orientation_decode(&buf), Some(90));
+
+        let mut buf2 = [0u8; 32];
+        display_config_encode(720, 1280, 90, 2, 11, 0x1234, &mut buf2);
+        let (msg2, seq2, token2) = input_msg_decode(&buf2).unwrap();
+        assert_eq!(msg2, InputMsg::DisplayConfig);
+        assert_eq!(seq2, 11);
+        assert_eq!(token2, 0x1234);
+        let (w, h, orient, rot) = display_config_decode(&buf2).unwrap();
+        assert_eq!(w, 720);
+        assert_eq!(h, 1280);
+        assert_eq!(orient, 90);
+        assert_eq!(rot, 2);
     }
 }

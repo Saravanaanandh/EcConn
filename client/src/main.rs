@@ -55,11 +55,16 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_SERVER_PORT}"))
         .parse()
         .context("--server must look like 127.0.0.1:9000")?;
-    let (width, height) =
+    let (mut width, mut height) =
         parse_size(&value(&args, "--size").unwrap_or_else(|| "1280x720".to_string()))?;
     let requested_window = value(&args, "--window").map(|text| parse_size(&text)).transpose()?;
     // Default to fullscreen for extended display unless a specific window size is requested.
     let mut fullscreen = args.iter().any(|arg| arg == "--fullscreen") || requested_window.is_none();
+    let flip = args.iter().any(|arg| arg == "--flip");
+    let orientation_arg: Option<u16> = value(&args, "--orientation")
+        .map(|s| s.parse().context("--orientation must be 0, 90, 180, or 270"))
+        .transpose()?;
+    let mut current_orientation: u16 = orientation_arg.unwrap_or(0);
     let seconds: u64 = match value(&args, "--seconds") {
         Some(text) => text.parse().context("--seconds must be a number")?,
         None => 0,
@@ -67,6 +72,7 @@ fn run() -> Result<()> {
 
     // Runtime diagnostics: show exactly which ports the processes are using.
     println!("client_ports: bind={bind} server={server}");
+    println!("client size: {width}x{height}");
 
     let sdl = sdl2::init().map_err(|err| anyhow!("SDL init failed: {err}"))?;
     let video = sdl
@@ -88,18 +94,25 @@ fn run() -> Result<()> {
     };
 
     println!(
-        "client: video on {bind}, keyframe requests to {server}, stream {width}x{height}, window {window_width}x{window_height}{}",
-        if fullscreen { " (fullscreen)" } else { "" }
+        "client: video on {bind}, keyframe requests to {server}, stream {width}x{height}, window {window_width}x{window_height}{}{}",
+        if fullscreen { " (fullscreen)" } else { "" },
+        if flip { " (flip 180°)" } else { "" }
     );
+    println!("client size: {width}x{height}");
 
     let stats = Arc::new(Stats::default());
     let running = Arc::new(AtomicBool::new(true));
 
+    let (config_tx, config_rx) = std::sync::mpsc::sync_channel::<(u32, u32, u16, u8)>(4);
     let (decoder, sink) = Decoder::new(width, height)?;
-    let receiver = Receiver::new(bind, server, stats.clone(), running.clone())?;
+    let receiver = Receiver::new(bind, server, width, height, config_tx, stats.clone(), running.clone())?;
     // The sender must be created before spawn() consumes the receiver.
     let mut input = receiver.input_sender()?;
     let net_thread = receiver.spawn(decoder);
+
+    if let Some(orient) = orientation_arg {
+        let _ = input.set_orientation(orient);
+    }
 
     let mut builder = video.window("lowlat-screen", window_width, window_height);
     builder.resizable();
@@ -127,7 +140,7 @@ fn run() -> Result<()> {
         .event_pump()
         .map_err(|err| anyhow!("getting the SDL event pump failed: {err}"))?;
 
-    let pitch = width as usize; // IYUV: Y plane pitch = width (bytes per row)
+    let mut pitch = width as usize; // IYUV: Y plane pitch = width (bytes per row)
     let started = Instant::now();
     let limit = (seconds > 0).then(|| Duration::from_secs(seconds));
     let mut last_report = Instant::now();
@@ -171,6 +184,20 @@ fn run() -> Result<()> {
                         }
                         Err(err) => eprintln!("fullscreen toggle failed: {err}"),
                     }
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::R),
+                    repeat: false,
+                    ..
+                } => {
+                    current_orientation = match current_orientation {
+                        0 => 90,
+                        90 => 180,
+                        180 => 270,
+                        _ => 0,
+                    };
+                    println!("requesting orientation change to {current_orientation}°");
+                    count_send(input.set_orientation(current_orientation), &mut input_events_sent, "set orientation");
                 }
                 Event::KeyDown {
                     scancode: Some(sc),
@@ -232,10 +259,30 @@ fn run() -> Result<()> {
             if last_mouse_send.elapsed() >= Duration::from_millis(MOUSE_MOVE_INTERVAL_MS) {
                 pending_move = None;
                 let (ww, wh) = canvas.window().size();
-                let nx = normalize_coord(x, ww);
-                let ny = normalize_coord(y, wh);
+                let (eff_x, eff_y) = if flip {
+                    ((ww as i32 - 1 - x).max(0), (wh as i32 - 1 - y).max(0))
+                } else {
+                    (x, y)
+                };
+                let nx = normalize_coord(eff_x, ww);
+                let ny = normalize_coord(eff_y, wh);
                 count_send(input.mouse_move(nx, ny), &mut input_events_sent, "mouse move");
                 last_mouse_send = Instant::now();
+            }
+        }
+
+        // Check for server display configuration updates
+        while let Ok((new_w, new_h, new_orient, _new_rot)) = config_rx.try_recv() {
+            println!("client size: {new_w}x{new_h}");
+            current_orientation = new_orient;
+            width = new_w;
+            height = new_h;
+            pitch = width as usize;
+            texture = texture_creator
+                .create_texture_streaming(PixelFormatEnum::IYUV, width, height)
+                .map_err(|err| anyhow!("recreating the video texture failed: {err}"))?;
+            if !fullscreen {
+                let _ = canvas.window_mut().set_size(width, height);
             }
         }
 
@@ -257,9 +304,15 @@ fn run() -> Result<()> {
                         pitch, // IYUV pitch = width in bytes per row (usize)
                     )
                     .map_err(|err| anyhow!("uploading a frame failed: {err}"))?;
-                canvas
-                    .copy(&texture, None, None)
-                    .map_err(|err| anyhow!("drawing a frame failed: {err}"))?;
+                if flip {
+                    canvas
+                        .copy_ex(&texture, None, None, 180.0, None, false, false)
+                        .map_err(|err| anyhow!("drawing flipped frame failed: {err}"))?;
+                } else {
+                    canvas
+                        .copy(&texture, None, None)
+                        .map_err(|err| anyhow!("drawing a frame failed: {err}"))?;
+                }
                 canvas.present();
 
                 let render_elapsed = render_started.elapsed().as_secs_f32() * 1000.0;

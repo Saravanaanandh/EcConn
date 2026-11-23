@@ -627,4 +627,133 @@ mod tests {
         assert_eq!(updated.matches("<width>1920</width>").count(), 1);
         assert_eq!(updated.matches("<width>2560</width>").count(), 1);
     }
+
+    #[test]
+    fn test_change_display_settings_live() {
+        use windows::Win32::Devices::Display::*;
+        use windows::Win32::Graphics::Gdi::*;
+        use windows::core::HSTRING;
+        unsafe {
+            let mut num_paths = 0u32;
+            let mut num_modes = 0u32;
+            let res = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes);
+            println!("GetDisplayConfigBufferSizes res={:?}, paths={}, modes={}", res, num_paths, num_modes);
+
+            let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); num_paths as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); num_modes as usize];
+
+            let query_res = QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut num_paths,
+                paths.as_mut_ptr(),
+                &mut num_modes,
+                modes.as_mut_ptr(),
+                None,
+            );
+            println!("QueryDisplayConfig query_res={:?}", query_res);
+
+            for (idx, p) in paths.iter().enumerate() {
+                let mut target_name = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+                target_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                target_name.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+                target_name.header.adapterId = p.targetInfo.adapterId;
+                target_name.header.id = p.targetInfo.id;
+                let _ = DisplayConfigGetDeviceInfo(&mut target_name.header);
+                let monitor_friendly = String::from_utf16_lossy(&target_name.monitorFriendlyDeviceName).trim_matches('\0').to_string();
+
+                let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+                source_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source_name.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                source_name.header.adapterId = p.sourceInfo.adapterId;
+                source_name.header.id = p.sourceInfo.id;
+                let _ = DisplayConfigGetDeviceInfo(&mut source_name.header);
+                let gdi_name = String::from_utf16_lossy(&source_name.viewGdiDeviceName).trim_matches('\0').to_string();
+
+                println!("Path {}: gdi='{}', monitor='{}', rotation={:?}", idx, gdi_name, monitor_friendly, p.targetInfo.rotation);
+            }
+
+            // Find VDD path (Path 2 or gdi '\\.\DISPLAY11')
+            let vdd_idx = paths.iter().position(|p| {
+                let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+                source_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source_name.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                source_name.header.adapterId = p.sourceInfo.adapterId;
+                source_name.header.id = p.sourceInfo.id;
+                let _ = DisplayConfigGetDeviceInfo(&mut source_name.header);
+                let gdi_name = String::from_utf16_lossy(&source_name.viewGdiDeviceName).trim_matches('\0').to_string();
+                gdi_name == r"\\.\DISPLAY11"
+            }).expect("found VDD path");
+
+            println!("Found VDD at index {}", vdd_idx);
+
+            let name_wide: Vec<u16> = format!("{}\0", r"\\.\DISPLAY11").encode_utf16().collect();
+            let mut dm = DEVMODEW::default();
+            dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            let mut i = 0;
+            println!("Enumerating modes of DISPLAY11 with EDS_ROTATEDMODE:");
+            while EnumDisplaySettingsExW(windows::core::PCWSTR(name_wide.as_ptr()), ENUM_DISPLAY_SETTINGS_MODE(i), &mut dm, EDS_ROTATEDMODE).as_bool() {
+                println!("  mode {}: {}x{} @ {}Hz, orient={}", i, dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency, dm.Anonymous1.Anonymous2.dmDisplayOrientation.0);
+                i += 1;
+            }
+            let mut dm_curr = DEVMODEW::default();
+            dm_curr.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            let _ = EnumDisplaySettingsW(windows::core::PCWSTR(name_wide.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm_curr);
+            println!("Current VDD: pos=({}, {}), {}x{}, orient={}",
+                dm_curr.Anonymous1.Anonymous2.dmPosition.x, dm_curr.Anonymous1.Anonymous2.dmPosition.y,
+                dm_curr.dmPelsWidth, dm_curr.dmPelsHeight, dm_curr.Anonymous1.Anonymous2.dmDisplayOrientation.0);
+
+            let mut dm_target = DEVMODEW::default();
+            dm_target.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            let _ = EnumDisplaySettingsExW(windows::core::PCWSTR(name_wide.as_ptr()), ENUM_DISPLAY_SETTINGS_MODE(1), &mut dm_target, EDS_ROTATEDMODE);
+            dm_target.Anonymous1.Anonymous2.dmPosition = dm_curr.Anonymous1.Anonymous2.dmPosition;
+            dm_target.dmFields |= DM_POSITION;
+
+            println!("dm_target: pos=({}, {}), {}x{}, orient={}, fields={:x}",
+                dm_target.Anonymous1.Anonymous2.dmPosition.x, dm_target.Anonymous1.Anonymous2.dmPosition.y,
+                dm_target.dmPelsWidth, dm_target.dmPelsHeight, dm_target.Anonymous1.Anonymous2.dmDisplayOrientation.0, dm_target.dmFields.0);
+
+            for sz in [188u16, 220u16] {
+                let mut dm_test = dm_curr;
+                dm_test.dmSize = sz;
+                dm_test.dmDriverExtra = 0;
+                println!("Testing dm_curr with dmSize={}:", sz);
+                let r1 = ChangeDisplaySettingsExW(windows::core::PCWSTR(name_wide.as_ptr()), Some(&dm_test), None, CDS_UPDATEREGISTRY | CDS_NORESET, None);
+                let r2 = ChangeDisplaySettingsExW(windows::core::PCWSTR::null(), None, None, CDS_TYPE(0), None);
+                println!("  CDS_UPDATEREGISTRY|CDS_NORESET: {:?}, commit: {:?}", r1, r2);
+
+                // Now test rotating 90
+                let mut dm90 = dm_curr;
+                dm90.dmSize = sz;
+                dm90.dmDriverExtra = 0;
+                dm90.Anonymous1.Anonymous2.dmDisplayOrientation = DMDO_90;
+                dm90.dmPelsWidth = dm_curr.dmPelsHeight;
+                dm90.dmPelsHeight = dm_curr.dmPelsWidth;
+                dm90.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION | DM_POSITION;
+                let r90_1 = ChangeDisplaySettingsExW(windows::core::PCWSTR(name_wide.as_ptr()), Some(&dm90), None, CDS_UPDATEREGISTRY | CDS_NORESET, None);
+                let r90_2 = ChangeDisplaySettingsExW(windows::core::PCWSTR::null(), None, None, CDS_TYPE(0), None);
+                println!("  dm90: {:?}, commit: {:?}", r90_1, r90_2);
+            }
+
+            // Check current settings after commit
+            let mut dm_now = DEVMODEW::default();
+            dm_now.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            let _ = EnumDisplaySettingsW(windows::core::PCWSTR(name_wide.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm_now);
+            println!("Current settings after commit: pos=({}, {}), {}x{}, orient={}",
+                dm_now.Anonymous1.Anonymous2.dmPosition.x, dm_now.Anonymous1.Anonymous2.dmPosition.y,
+                dm_now.dmPelsWidth, dm_now.dmPelsHeight, dm_now.Anonymous1.Anonymous2.dmDisplayOrientation.0);
+
+            // Revert back to 0
+            let mut dm_0 = dm_now;
+            dm_0.Anonymous1.Anonymous2.dmDisplayOrientation = DMDO_DEFAULT;
+            dm_0.dmPelsWidth = dm_now.dmPelsHeight;
+            dm_0.dmPelsHeight = dm_now.dmPelsWidth;
+            dm_0.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION | DM_POSITION;
+            let _ = ChangeDisplaySettingsExW(windows::core::PCWSTR(name_wide.as_ptr()), Some(&dm_0), None, CDS_UPDATEREGISTRY | CDS_NORESET, None);
+            let _ = ChangeDisplaySettingsExW(windows::core::PCWSTR::null(), None, None, CDS_TYPE(0), None);
+            let _ = EnumDisplaySettingsW(windows::core::PCWSTR(name_wide.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm_now);
+            println!("Current settings after revert: pos=({}, {}), {}x{}, orient={}",
+                dm_now.Anonymous1.Anonymous2.dmPosition.x, dm_now.Anonymous1.Anonymous2.dmPosition.y,
+                dm_now.dmPelsWidth, dm_now.dmPelsHeight, dm_now.Anonymous1.Anonymous2.dmDisplayOrientation.0);
+        }
+    }
 }

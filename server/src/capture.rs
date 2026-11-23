@@ -32,6 +32,9 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
+};
 
 /// Outcome of one `acquire()` call.
 pub struct Acquired {
@@ -79,6 +82,8 @@ pub struct Capture {
     /// Desktop position of the captured output (for input mapping).
     x: i32,
     y: i32,
+    name: String,
+    rotation: u32,
     format: DXGI_FORMAT,
     pixel_format: &'static str,
     buffer: Vec<u8>,
@@ -152,9 +157,14 @@ impl Capture {
     /// Attach to the DXGI output at `monitor_index` (0 = first output found)
     /// and prepare the CPU buffer.
     pub fn new(monitor_index: u32) -> Result<Self> {
-        // Duplication is COM-based. MTA is what a capture thread wants; a
-        // failure here (e.g. RPC_E_CHANGED_MODE) is not fatal for our use.
+        // Ensure this thread is attached to the interactive input desktop,
+        // otherwise DuplicateOutput fails with E_ACCESSDENIED when running
+        // in a non-default desktop or background sandbox.
         unsafe {
+            if let Ok(hdesk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0x1FF)) {
+                let _ = SetThreadDesktop(hdesk);
+                let _ = CloseDesktop(hdesk);
+            }
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
@@ -214,6 +224,7 @@ impl Capture {
             );
         }
 
+        let monitor_name = monitors[monitor_index as usize].name.clone();
         let staging = create_staging_texture(&device, width, height, format)?;
 
         let buffer = vec![0u8; width as usize * height as usize * 4];
@@ -228,12 +239,29 @@ impl Capture {
             height,
             x,
             y,
+            name: monitor_name,
+            rotation: desc.Rotation.0 as u32,
             format,
             pixel_format,
             buffer,
             brightness: 0.0,
             size_changed: false,
         })
+    }
+
+    /// Name of the captured monitor device (e.g. `\\.\DISPLAY11`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Rotation of the duplicated output as reported by DXGI.
+    pub fn rotation(&self) -> u32 {
+        self.rotation
+    }
+
+    /// Explicitly trigger a duplication re-creation (e.g. after display mode change).
+    pub fn force_recreate(&mut self) -> Result<bool> {
+        self.recreate_duplication()
     }
 
     /// Width of the captured output in pixels.
@@ -389,6 +417,7 @@ impl Capture {
 
         let desc = unsafe { self.duplication.GetDesc() };
         let (width, height, format) = (desc.ModeDesc.Width, desc.ModeDesc.Height, desc.ModeDesc.Format);
+        self.rotation = desc.Rotation.0 as u32;
 
         if width == 0 || height == 0 {
             return Ok(false);

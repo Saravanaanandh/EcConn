@@ -2,7 +2,7 @@
 //! listens for keyframe requests coming back from the client on the same port.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use common::{
-    packet_count, FrameHeader, DATAGRAM_SIZE, FLAG_KEYFRAME, HEADER_LEN, MAX_PAYLOAD,
+    display_config_encode, input_msg_decode, packet_count, set_orientation_decode,
+    FrameHeader, InputMsg, DATAGRAM_SIZE, FLAG_KEYFRAME, HEADER_LEN, MAX_PAYLOAD,
 };
 
 use crate::encoder::EncodedFrame;
@@ -41,15 +42,26 @@ impl NetSender {
         self,
         frames: Receiver<EncodedFrame>,
         force_keyframe: Arc<AtomicBool>,
+        pending_orientation: Arc<AtomicU32>,
+        config_rx: Receiver<(u32, u32, u16, u8, MonitorRect)>,
         rect: MonitorRect,
+        orientation: u16,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("udp-sender".into())
-            .spawn(move || self.run(frames, force_keyframe, rect))
+            .spawn(move || self.run(frames, force_keyframe, pending_orientation, config_rx, rect, orientation))
             .expect("spawning the udp sender thread failed")
     }
 
-    fn run(self, frames: Receiver<EncodedFrame>, force_keyframe: Arc<AtomicBool>, rect: MonitorRect) {
+    fn run(
+        self,
+        frames: Receiver<EncodedFrame>,
+        force_keyframe: Arc<AtomicBool>,
+        pending_orientation: Arc<AtomicU32>,
+        config_rx: Receiver<(u32, u32, u16, u8, MonitorRect)>,
+        rect: MonitorRect,
+        orientation: u16,
+    ) {
         let mut datagram = [0u8; DATAGRAM_SIZE];
         let mut control = [0u8; 64];
         let mut frame_id: u32 = 0;
@@ -59,8 +71,40 @@ impl NetSender {
         let mut keyframe_requests = 0u64;
         let mut last_report = Instant::now();
         let mut input = InputInjector::new(rect);
+        input.set_orientation(orientation);
+
+        let mut current_config = (rect.width, rect.height, orientation, 1u8);
+
+        // Helper closure to send DisplayConfig packet to dest
+        let send_config = |socket: &UdpSocket, dest: SocketAddr, w: u32, h: u32, orient: u16, rot: u8, start: Instant| {
+            let mut buf = [0u8; HEADER_LEN + 24];
+            let hdr = FrameHeader {
+                flags: 0,
+                frame_id: 0,
+                packet_index: 0,
+                packet_count: 1,
+                timestamp_us: start.elapsed().as_micros() as u64,
+                payload_len: 24,
+            };
+            hdr.encode(&mut buf[..HEADER_LEN]);
+            display_config_encode(w, h, orient, rot, 0, 0x4C4C5332, &mut buf[HEADER_LEN..]);
+            let _ = socket.send_to(&buf, dest);
+        };
+
+        // Send initial DisplayConfig packet
+        send_config(&self.socket, self.dest, current_config.0, current_config.1, current_config.2, current_config.3, self.start);
 
         loop {
+            // Check for display configuration updates from the main thread
+            while let Ok((w, h, orient, rot, new_rect)) = config_rx.try_recv() {
+                current_config = (w, h, orient, rot);
+                input.set_rect(new_rect);
+                input.set_orientation(orient);
+                // Send twice for UDP redundancy
+                send_config(&self.socket, self.dest, w, h, orient, rot, self.start);
+                send_config(&self.socket, self.dest, w, h, orient, rot, self.start);
+            }
+
             // Drain control datagrams. A timeout/would-block error just means
             // nothing is waiting for us.
             loop {
@@ -71,11 +115,24 @@ impl NetSender {
                                 keyframe_requests += 1;
                                 force_keyframe.store(true, Ordering::Relaxed);
                                 println!("keyframe request from {from}");
+                                // Also reply with DisplayConfig so client stays in sync
+                                send_config(&self.socket, from, current_config.0, current_config.1, current_config.2, current_config.3, self.start);
                             } else if header.flags == 0 && header.payload_len >= 14 {
-                                // Input datagram: same header, input payload.
+                                // Input or control datagram
                                 let end = HEADER_LEN + header.payload_len as usize;
                                 if len >= end {
-                                    input.process(&control[HEADER_LEN..end]);
+                                    let payload = &control[HEADER_LEN..end];
+                                    if let Some((msg, _seq, _token)) = input_msg_decode(payload) {
+                                        if msg == InputMsg::SetOrientation {
+                                            if let Some(target_deg) = set_orientation_decode(payload) {
+                                                println!("client requested orientation: {target_deg}°");
+                                                pending_orientation.store(target_deg as u32, Ordering::SeqCst);
+                                                force_keyframe.store(true, Ordering::Relaxed);
+                                            }
+                                        } else {
+                                            input.process(payload);
+                                        }
+                                    }
                                 }
                             }
                         }

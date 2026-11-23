@@ -59,6 +59,7 @@ impl Encoder {
         frames: SyncSender<EncodedFrame>,
         encode_path: &str,
         need_scale: bool,
+        orientation: u16,
     ) -> Result<Self> {
         let gop: u32 = fps / 2;
 
@@ -80,9 +81,30 @@ impl Encoder {
            .arg("-i")
            .arg("-"); // read from stdin
 
-        // Add scale filter if needed (after -i, before -c:v)
+        // Assemble video filters: rotation/transpose and scaling as needed
+        let mut filters = Vec::new();
+        match orientation {
+            90 => {
+                if capture_width > capture_height && width < height {
+                    filters.push("transpose=1".to_string());
+                }
+            }
+            180 => {
+                filters.push("hflip,vflip".to_string());
+            }
+            270 => {
+                if capture_width > capture_height && width < height {
+                    filters.push("transpose=2".to_string());
+                }
+            }
+            _ => {}
+        }
         if need_scale {
-            cmd.arg("-vf").arg(format!("scale={}:{}", width, height));
+            filters.push(format!("scale={}:{}", width, height));
+        }
+
+        if !filters.is_empty() {
+            cmd.arg("-vf").arg(filters.join(","));
         }
 
         // Path-specific codec and output options
