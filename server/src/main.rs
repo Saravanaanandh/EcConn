@@ -169,10 +169,30 @@ fn run() -> Result<()> {
     // M6: list monitors and exit
     if args.iter().any(|a| a == "--list-monitors") {
         let monitors = capture::Capture::list_monitors()?;
-        for m in monitors {
+        for m in &monitors {
             eprintln!(
-                "monitor {}: {}x{} at ({},{}) name='{}'",
-                m.index, m.width, m.height, m.left, m.top, m.name
+                "monitor {}: {}x{} at ({},{}) name='{}' adapter='{}'",
+                m.index, m.width, m.height, m.left, m.top, m.name, m.adapter
+            );
+        }
+
+        // Cross-check against what Windows itself says is on the desktop.
+        // DXGI only exposes outputs it can duplicate, so a display that
+        // Windows counts but DXGI does not (a virtual/indirect display, an
+        // output the driver refused, or a display that is disconnected) would
+        // otherwise be invisible here. Say so instead of silently agreeing.
+        let windows_count = capture::Capture::windows_monitor_count();
+        eprintln!(
+            "{} monitor(s) capturable; Windows reports {} active monitor(s) on the desktop",
+            monitors.len(),
+            windows_count
+        );
+        if windows_count > monitors.len() as u32 {
+            eprintln!(
+                "note: {} monitor(s) Windows sees cannot be captured with DXGI; \
+                 check Display settings for a display that is disconnected, \
+                 mirrored, or driven by another adapter",
+                windows_count - monitors.len() as u32
             );
         }
         std::process::exit(0);

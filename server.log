@@ -1,8 +1,0 @@
-server: bind 0.0.0.0:9000, sending to 127.0.0.1:9100, 30 fps target (keyframe listener on 0.0.0.0:9000)
-server_ports: bind=0.0.0.0:9000 dest=127.0.0.1:9100
-capture 1920x1080, encoding 1280x720
-scaling from capture size to encode size via ffmpeg -vf scale=1280:720
-encode-path: 'libx264'
-ffmpeg command: ffmpeg -y -hide_banner -loglevel error -f rawvideo -pixel_format bgra -video_size 1920x1080 -framerate 30 -i - -vf scale=1280:720 -an -flush_packets 1 -f h264 pipe:1 -c:v libx264 -preset ultrafast -tune zerolatency -g 15 -bf 0 -x264-params aud=1:repeat-headers=1:keyint=15:min-keyint=15:scenecut=0:bframes=0
-error: udp sender stopped: 0 frames, 0 packets, 0 keyframe requests
-program not found

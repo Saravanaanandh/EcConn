@@ -108,6 +108,12 @@ fn run() -> Result<()> {
     let window = builder
         .build()
         .map_err(|err| anyhow!("creating the window failed: {err}"))?;
+
+    // Hide the local OS cursor while the client window is in use.
+    // The remote desktop's cursor is captured inside the video stream
+    // (server overlays it into the frame), so the local cursor would
+    // only appear as a confusing duplicate on top of the video.
+    sdl.mouse().show_cursor(false);
     let mut canvas = window
         .into_canvas()
         .build()
@@ -216,6 +222,17 @@ fn run() -> Result<()> {
                     btn_mask = 0;
                     pending_move = None;
                     let _ = input.release_all();
+                    // Restore local cursor while the window is out of focus
+                    // so the user can interact with other applications.
+                    sdl.mouse().show_cursor(true);
+                }
+                Event::Window {
+                    win_event: WindowEvent::FocusGained,
+                    ..
+                } => {
+                    // Hide the local cursor again when the user returns to
+                    // the stream window; the remote cursor is in the video.
+                    sdl.mouse().show_cursor(false);
                 }
                 _ => {}
             }
@@ -285,6 +302,8 @@ fn run() -> Result<()> {
 
     // On clean exit, release all keys and mouse buttons on the server.
     let _ = input.release_all();
+    // Restore the local cursor on exit.
+    sdl.mouse().show_cursor(true);
 
     running.store(false, Ordering::Relaxed);
     let _ = net_thread.join();

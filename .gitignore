@@ -2,3 +2,6 @@
 out.mp4
 out.h264
 *.mp4
+*.log
+build_out.txt
+
