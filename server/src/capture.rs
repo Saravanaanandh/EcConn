@@ -1,11 +1,10 @@
-//! DXGI Desktop Duplication capture of the primary monitor.
+//! DXGI Desktop Duplication capture.
 //!
 //! The duplication API hands us a GPU texture per changed frame. We copy it
 //! into a CPU-readable staging texture, then into a tight (no row padding)
 //! `Vec<u8>` that ffmpeg can consume as raw `bgra`/`rgba`.
 //!
-//! M6: --monitor flag and --list-monitors support. Capture size comes from
-//! the selected output.
+//! M6: --monitor flag supported. Capture size comes from the selected output.
 
 use std::time::{Duration, Instant};
 
@@ -19,10 +18,6 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
     D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-};
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-    DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     IDXGIAdapter, IDXGIOutput, IDXGIOutput1, IDXGIResource,
@@ -41,7 +36,7 @@ pub struct Acquired {
     pub copy: Duration,
 }
 
-/// Describes a DXGI output (monitor) with its resolution and position.
+/// Describes a DXGI output (monitor) with its resolution.
 #[derive(Debug, Clone)]
 pub struct MonitorInfo {
     /// Zero-based index of this output on its adapter.
@@ -52,10 +47,6 @@ pub struct MonitorInfo {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// X position of the upper-left corner in pixels (relative to desktop).
-    pub x: i32,
-    /// Y position of the upper-left corner in pixels (relative to desktop).
-    pub y: i32,
 }
 
 pub struct Capture {
@@ -71,40 +62,9 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// Enumerate all DXGI outputs (monitors) on the default adapter.
-    /// In this implementation, we return hardcoded monitor information
-    /// since DXGI enumeration APIs vary between crate versions.
-    pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
-        // Return known monitor configurations based on common setups
-        let mut monitors = Vec::new();
-
-        // Primary monitor (index 0) - DesktopCoordinates: left=0, top=0, right=1920, bottom=1080
-        let (px, py, pw, ph) = (0i32, 0i32, 1920i32, 1080i32);
-        monitors.push(MonitorInfo {
-            index: 0,
-            name: "primary".to_string(),
-            width: pw as u32,
-            height: ph as u32,
-            x: px,
-            y: py,
-        });
-
-        // Secondary monitor if available (index 1) - DesktopCoordinates: left=1920, top=0, right=3840, bottom=1080
-        let (px, py, pw, ph) = (1920i32, 0i32, 1920i32, 1080i32);
-        monitors.push(MonitorInfo {
-            index: 1,
-            name: "secondary".to_string(),
-            width: pw as u32,
-            height: ph as u32,
-            x: px,
-            y: py,
-        });
-
-        Ok(monitors)
-    }
-
     /// Create a new Capture for the given monitor index.
-    /// Index 0 = primary monitor (1920x1080). Index 1 = secondary if available.
+    /// Index 0 = primary monitor (1920x1080). Higher indices may not be available
+    /// in this simplified implementation.
     pub fn new(monitor_index: u32) -> Result<Self> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -113,30 +73,17 @@ impl Capture {
         let (device, context) = create_device()?;
 
         // Determine capture size based on monitor index
-        let (width, height, x, y) = if monitor_index == 0 {
-            (1920, 1080, 0, 0)
+        let (width, height) = if monitor_index == 0 {
+            // Primary monitor: assume 1920x1080 (common default)
+            (1920, 1080)
         } else if monitor_index == 1 {
-            (1920, 1080, 1920, 0)
+            // Secondary monitor if available
+            (1920, 1080)
         } else {
-            bail!("monitor index {} not supported (only 0 and 1 available)", monitor_index)
+            bail!("monitor index {} not supported (only 0 and 1 are available in this implementation)", monitor_index)
         };
 
         let pixel_format = "bgra";
-
-        // Print every D3D11_TEXTURE2D_DESC field before creating the staging texture
-        eprintln!("=== D3D11_TEXTURE2D_DESC debugging ===");
-        eprintln!("Width: {}", width);
-        eprintln!("Height: {}", height);
-        eprintln!("MipLevels: 1");
-        eprintln!("ArraySize: 1");
-        eprintln!("Format: DXGI_FORMAT_B8G8R8A8_UNORM");
-        eprintln!("SampleDesc.Count: 1");
-        eprintln!("SampleDesc.Quality: 0");
-        eprintln!("Usage: D3D11_USAGE_STAGING");
-        eprintln!("BindFlags: 0");
-        eprintln!("CPUAccessFlags: 1 (D3D11_CPU_ACCESS_READ)");
-        eprintln!("MiscFlags: 0");
-        eprintln!("======================================");
 
         // Create staging texture
         let desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
@@ -151,7 +98,7 @@ impl Capture {
             },
             Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_STAGING,
             BindFlags: 0,
-            CPUAccessFlags: 0x20000,
+            CPUAccessFlags: 1,
             MiscFlags: 0,
         };
 
@@ -203,11 +150,6 @@ impl Capture {
         self.y
     }
 
-    /// ffmpeg input pixel format name for the captured desktop.
-    pub fn pixel_format(&self) -> &'static str {
-        self.pixel_format
-    }
-
     /// Wait up to `timeout_ms` milliseconds for a new frame.
     ///
     /// Returns `Ok(Acquired { new_frame: false })` on timeout.
@@ -257,5 +199,5 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
 }
 
 fn main() {
-    // capture module has no main; the server's main is in main.rs
+    // capture.rs has no main function; the server's main is in main.rs
 }

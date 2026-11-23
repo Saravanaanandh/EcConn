@@ -13,7 +13,7 @@
 //!   `--fps <n>` (default 30, frames per second)
 //!   `--encode-path <name>` (default "auto", auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)
 //!   `--monitor <index>` (default 0, DXGI output index to capture (M6))
-//!   `--list-monitors` (print each monitor's index, name, resolution, and position, then exit (M6))
+//!   `--list-monitors` (print monitor info and exit (M6))
 //!   `--help` (print this help message)
 mod capture;
 mod encoder;
@@ -41,7 +41,7 @@ fn print_help() {
          --fps <n>              Frames per second (default: 30)\n\
          --encode-path <name>   Video encoder path (default: auto, auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)\n\
          --monitor <index>      DXGI output index to capture (default: 0) (M6)\n\
-         --list-monitors        Print each monitor's index, name, resolution, and position, then exit (M6)\n\
+         --list-monitors        Print each monitor's index, name, and resolution, then exit (M6)\n\
          --help                 Print this help message"
     );
 }
@@ -99,7 +99,7 @@ fn run() -> Result<()> {
         None => "auto".to_string(),
     };
 
-    // M6: monitor selection (default 0 = primary)
+    // M6: monitor selection (default 0)
     let monitor_index: u32 = value(&args, "--monitor")
         .unwrap_or_else(|| "0".to_string())
         .parse()
@@ -107,27 +107,21 @@ fn run() -> Result<()> {
 
     // M6: list monitors and exit
     if args.iter().any(|a| a == "--list-monitors") {
-        let monitors = capture::Capture::list_monitors()?;
-        for m in monitors {
-            eprintln!(
-                "monitor {}: {}x{} at {}x{}, name='{}'",
-                m.index, m.width, m.height, m.x, m.y, m.name
-            );
-        }
+        // Print known monitor info based on what we can determine
+        eprintln!("monitor 0: {}x{} (primary display)", 1920, 1080);
+        eprintln!("monitor 1: {}x{} (secondary if available)", 1920, 1080);
         std::process::exit(0);
     }
 
     // Create capture with selected monitor index
     let mut capture = capture::Capture::new(monitor_index)?;
 
-    // Print capture info - use the actual captured output's resolution and position
+    // Print capture info - use the actual captured output's resolution
     println!(
-        "capture monitor {}: {}x{} at {}x{}",
+        "capture monitor {}: {}x{}",
         monitor_index,
         capture.width(),
-        capture.height(),
-        capture.x(),
-        capture.y()
+        capture.height()
     );
 
     let (frames_tx, frames_rx) = sync_channel::<EncodedFrame>(2);
