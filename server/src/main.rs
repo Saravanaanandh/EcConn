@@ -1,12 +1,12 @@
 //! M2 server: capture the primary monitor, encode H.264, send over UDP.
 //!
 //! ```text
-//! cargo run -p server --release -- --dest 127.0.0.1:9100
+//! cargo run -p server --release -- --dest 0.0.0.0:9100
 //! ```!
 //! 
 //! Flags:
-//!   `--dest <ip:port>` (default 127.0.0.1:9100, where video is sent)
-//!   `--bind <ip:port>` (default 127.0.0.1:9000, also receives keyframe requests)
+//!   `--dest <ip:port>` (default 0.0.0.0:9100, where video is sent)
+//!   `--bind <ip:port>` (default 0.0.0.0:9000, also receives keyframe requests)
 //!   `--seconds <n>` (default 0 = run until Ctrl+C)
 //!   `--width <W>` (default 1280, encode/stream width)
 //!   `--height <H>` (default 720, encode/stream height)
@@ -42,8 +42,8 @@ use crate::net::NetSender;
 fn print_help() {
     eprintln!(
         "lowlat-screen server usage:\n\
-         --dest <ip:port>       Destination address for UDP video (default: 127.0.0.1:9100)\n\
-         --bind <ip:port>       Local bind address for UDP (default: 127.0.0.1:9000)\n\
+         --dest <ip:port>       Destination address for UDP video (default: 0.0.0.0:9100)\n\
+         --bind <ip:port>       Local bind address for UDP (default: 0.0.0.0:9000)\n\
          --seconds <n>          Run for n seconds, 0 = forever (default: 0)\n\
          --width <W>            Encode/stream width in pixels (default: 1280)\n\
          --height <H>           Encode/stream height in pixels (default: 720)\n\
@@ -120,13 +120,13 @@ fn run() -> Result<()> {
     }
 
     let dest: SocketAddr = value(&args, "--dest")
-        .unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_CLIENT_PORT}"))
+        .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_CLIENT_PORT}"))
         .parse()
         .context("--dest must look like 192.168.50.2:9100")?;
     let bind: SocketAddr = value(&args, "--bind")
-        .unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_SERVER_PORT}"))
+        .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_SERVER_PORT}"))
         .parse()
-        .context("--bind must look like 127.0.0.1:9000")?;
+        .context("--bind must look like 0.0.0.0:9000")?;
 
     // M3 flags: encode resolution and fps
     let width: u32 = value(&args, "--width")
