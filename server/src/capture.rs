@@ -6,11 +6,6 @@
 //!
 //! M6: `--monitor <index>` selects any DXGI output (enumerated across all
 //! adapters) and the capture size/format come from the duplication itself.
-//!
-//! Cursor overlay: DXGI Desktop Duplication does NOT mix the hardware cursor
-//! into the captured frame; it delivers cursor shape and position separately
-//! via `DXGI_OUTDUPL_FRAME_INFO`. We fetch that data each frame and software-
-//! blit it onto the CPU buffer so the remote viewer sees the cursor move.
 
 use std::time::{Duration, Instant};
 
@@ -34,12 +29,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
-    DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
 
 /// Outcome of one `acquire()` call.
 pub struct Acquired {
@@ -63,8 +55,6 @@ pub struct MonitorInfo {
     pub index: u32,
     /// GDI device name, e.g. `\\.\DISPLAY1`.
     pub name: String,
-    /// Description of the adapter that drives this output.
-    pub adapter: String,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
@@ -73,41 +63,6 @@ pub struct MonitorInfo {
     pub left: i32,
     /// Top edge in desktop coordinates.
     pub top: i32,
-}
-
-/// Cursor overlay state: last known shape (BGRA pixels) and position on the
-/// captured output. Updated each frame from `DXGI_OUTDUPL_FRAME_INFO`.
-struct CursorState {
-    /// BGRA pixel data of the cursor, pre-converted from whatever DXGI gives.
-    /// Empty when the cursor shape has never been fetched.
-    shape: Vec<u8>,
-    /// Width of the cursor image in pixels.
-    shape_width: i32,
-    /// Height of the cursor image in pixels.
-    shape_height: i32,
-    /// Hot-spot offset within the cursor image (pixels).
-    hot_x: i32,
-    hot_y: i32,
-    /// Cursor position in desktop coordinates (top-left of hot-spot).
-    pos_x: i32,
-    pos_y: i32,
-    /// Whether the cursor is currently visible.
-    visible: bool,
-}
-
-impl Default for CursorState {
-    fn default() -> Self {
-        Self {
-            shape: Vec::new(),
-            shape_width: 0,
-            shape_height: 0,
-            hot_x: 0,
-            hot_y: 0,
-            pos_x: 0,
-            pos_y: 0,
-            visible: false,
-        }
-    }
 }
 
 /// Captures raw video frames from a DXGI output using Desktop Duplication.
@@ -133,49 +88,65 @@ pub struct Capture {
     /// Set when a desktop mode change resized the capture, so the caller can
     /// rebuild the encoder for the new input size.
     size_changed: bool,
-    /// Cursor state: last known position (relative to this output) and shape.
-    cursor: CursorState,
 }
 
 impl Capture {
     /// Enumerate every DXGI output (monitor) across all adapters.
-    ///
-    /// `Capture::new` walks the same list, so a `--monitor <index>` always
-    /// refers to the output that `--list-monitors` printed at that index.
     pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+
         let factory: IDXGIFactory1 =
             unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
-        let outputs = enumerate_outputs(&factory)?;
 
-        let monitors = outputs
-            .iter()
-            .enumerate()
-            .map(|(index, out)| {
-                let rect = out.desc.DesktopCoordinates;
-                MonitorInfo {
-                    index: index as u32,
-                    name: device_name(&out.desc.DeviceName),
-                    adapter: out.adapter_name.clone(),
-                    width: (rect.right - rect.left).max(0) as u32,
-                    height: (rect.bottom - rect.top).max(0) as u32,
+        let mut monitors = Vec::new();
+        let mut index = 0u32;
+        let mut adapter_index = 0u32;
+
+        loop {
+            let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(adapter_index) } {
+                Ok(adapter) => adapter,
+                Err(err) if err.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(err) => return Err(err).context("EnumAdapters1 failed"),
+            };
+            adapter_index += 1;
+
+            let mut output_index = 0u32;
+            loop {
+                let output = match unsafe { adapter.EnumOutputs(output_index) } {
+                    Ok(output) => output,
+                    Err(err) if err.code() == DXGI_ERROR_NOT_FOUND => break,
+                    // An adapter can report an error mid-enumeration (e.g. a
+                    // detached output); skip the rest of that adapter.
+                    Err(_) => break,
+                };
+                output_index += 1;
+
+                let desc = match unsafe { output.GetDesc() } {
+                    Ok(desc) => desc,
+                    Err(_) => continue,
+                };
+                let rect = desc.DesktopCoordinates;
+                let width = (rect.right - rect.left).max(0) as u32;
+                let height = (rect.bottom - rect.top).max(0) as u32;
+
+                monitors.push(MonitorInfo {
+                    index,
+                    name: device_name(&desc.DeviceName),
+                    width,
+                    height,
                     left: rect.left,
                     top: rect.top,
-                }
-            })
-            .collect::<Vec<_>>();
+                });
+                index += 1;
+            }
+        }
 
         if monitors.is_empty() {
             bail!("no DXGI outputs found - is a monitor attached?");
         }
         Ok(monitors)
-    }
-
-    /// How many monitors Windows itself reports on the desktop
-    /// (`SM_CMONITORS`), which is the reference `--list-monitors` checks
-    /// itself against: if Windows sees more monitors than DXGI exposes, the
-    /// extra display is not capturable and the caller should say so.
-    pub fn windows_monitor_count() -> u32 {
-        (unsafe { GetSystemMetrics(SM_CMONITORS) }).max(0) as u32
     }
 
     /// Attach to the DXGI output at `monitor_index` (0 = first output found)
@@ -187,41 +158,28 @@ impl Capture {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        // One walk of the factory for both listing and selection, so the
-        // index printed by --list-monitors is the index captured here.
+        let monitors = Self::list_monitors()?;
+        if monitor_index as usize >= monitors.len() {
+            let available = monitors
+                .iter()
+                .map(|m| format!("{} ({}x{})", m.index, m.width, m.height))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "monitor index {} not found; available: {}",
+                monitor_index,
+                available
+            );
+        }
+
+        // Find the adapter that owns this output: DuplicateOutput only works
+        // when the D3D11 device was created on the same adapter.
         let factory: IDXGIFactory1 =
             unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
-        let outputs = enumerate_outputs(&factory)?;
-
-        let available = outputs
-            .iter()
-            .enumerate()
-            .map(|(index, out)| {
-                let rect = out.desc.DesktopCoordinates;
-                format!(
-                    "{} ({}x{})",
-                    index,
-                    (rect.right - rect.left).max(0),
-                    (rect.bottom - rect.top).max(0)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let Some(selected) = outputs.into_iter().nth(monitor_index as usize) else {
-            bail!("monitor index {monitor_index} not found; available: {available}");
-        };
-
-        // DuplicateOutput only works when the D3D11 device was created on the
-        // adapter that owns this output, so both come from the same record.
-        let DxgiOutput {
-            adapter,
-            output,
-            desc: out_desc,
-            ..
-        } = selected;
+        let (adapter, output) = find_output(&factory, monitor_index)?;
 
         // Desktop position of this output, used to map client input coords.
+        let out_desc = unsafe { output.GetDesc() }.context("reading the output desc failed")?;
         let x = out_desc.DesktopCoordinates.left;
         let y = out_desc.DesktopCoordinates.top;
 
@@ -275,7 +233,6 @@ impl Capture {
             buffer,
             brightness: 0.0,
             size_changed: false,
-            cursor: CursorState::default(),
         })
     }
 
@@ -357,37 +314,8 @@ impl Capture {
 
         // Pointer-only updates return a frame with no accumulated desktop
         // image. Releasing it without a copy keeps the previous buffer.
-        // However we still need to update the cursor position/shape first.
-        let has_desktop = !(info.AccumulatedFrames == 0 && info.LastPresentTime == 0);
-
-        // --- Cursor update ---
-        // Position update: happens even on pointer-only frames.
-        if info.LastMouseUpdateTime != 0 {
-            self.cursor.visible = info.PointerPosition.Visible.as_bool();
-            self.cursor.pos_x = info.PointerPosition.Position.x;
-            self.cursor.pos_y = info.PointerPosition.Position.y;
-        }
-        // Shape update: only when DXGI says the shape changed.
-        if info.PointerShapeBufferSize > 0 {
-            self.fetch_cursor_shape(info.PointerShapeBufferSize);
-        }
-
-        if !has_desktop {
+        if info.AccumulatedFrames == 0 && info.LastPresentTime == 0 {
             let _ = unsafe { self.duplication.ReleaseFrame() };
-            // If the cursor moved but no desktop change, re-composite the
-            // cursor onto the existing buffer and emit a new frame so the
-            // viewer sees the cursor glide smoothly.
-            if info.LastMouseUpdateTime != 0 {
-                self.overlay_cursor();
-                self.brightness = average_brightness(&self.buffer);
-                return Ok(Acquired {
-                    new_frame: true,
-                    wait,
-                    copy: Duration::ZERO,
-                    brightness: self.brightness,
-                    frame_status: "cursor",
-                });
-            }
             return Ok(Acquired {
                 new_frame: false,
                 wait,
@@ -437,9 +365,6 @@ impl Capture {
                 .context("ReleaseFrame failed")?;
         }
 
-        // Composite the cursor on top of the freshly-copied desktop pixels.
-        self.overlay_cursor();
-
         self.brightness = average_brightness(&self.buffer);
 
         Ok(Acquired {
@@ -480,180 +405,7 @@ impl Capture {
             eprintln!("capture resized to {width}x{height}, rebuilding the encoder");
         }
 
-        // After ACCESS_LOST the new duplication will re-send cursor shape.
-        self.cursor.shape.clear();
-
         Ok(true)
-    }
-
-    /// Fetch the cursor shape from DXGI into `self.cursor.shape` (BGRA).
-    ///
-    /// `buf_size` is the value DXGI reported in `PointerShapeBufferSize`; it
-    /// is used to allocate the right-sized buffer before calling the API.
-    fn fetch_cursor_shape(&mut self, buf_size: u32) {
-        let mut raw: Vec<u8> = vec![0u8; buf_size as usize];
-        let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
-        let mut required = 0u32;
-        let result = unsafe {
-            self.duplication.GetFramePointerShape(
-                buf_size,
-                raw.as_mut_ptr() as *mut _,
-                &mut required,
-                &mut info,
-            )
-        };
-        if result.is_err() {
-            return;
-        }
-
-        let w = info.Width as usize;
-        let h = info.Height as usize;
-        let pitch = info.Pitch as usize;
-
-        self.cursor.hot_x = info.HotSpot.x;
-        self.cursor.hot_y = info.HotSpot.y;
-
-        // Convert to BGRA regardless of source format.
-        // info.Type is u32; compare against .0 (i32) value of each constant.
-        let shape_type = info.Type as i32;
-        if shape_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 {
-            self.cursor.shape_width = w as i32;
-            self.cursor.shape_height = h as i32;
-            let mut bgra = vec![0u8; w * h * 4];
-            for row in 0..h {
-                let src_off = row * pitch;
-                let dst_off = row * w * 4;
-                bgra[dst_off..dst_off + w * 4]
-                    .copy_from_slice(&raw[src_off..src_off + w * 4]);
-            }
-            self.cursor.shape = bgra;
-        } else if shape_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 {
-            self.cursor.shape_width = w as i32;
-            self.cursor.shape_height = h as i32;
-            let mut bgra = vec![0u8; w * h * 4];
-            for row in 0..h {
-                let src_off = row * pitch;
-                let dst_off = row * w * 4;
-                for col in 0..w {
-                    let b = raw[src_off + col * 4];
-                    let g = raw[src_off + col * 4 + 1];
-                    let r = raw[src_off + col * 4 + 2];
-                    let a = raw[src_off + col * 4 + 3];
-                    bgra[dst_off + col * 4]     = b;
-                    bgra[dst_off + col * 4 + 1] = g;
-                    bgra[dst_off + col * 4 + 2] = r;
-                    bgra[dst_off + col * 4 + 3] = if a == 0 { 255 } else { a };
-                }
-            }
-            self.cursor.shape = bgra;
-        } else if shape_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 {
-            let and_height = h;
-            let row_bytes = pitch;
-            self.cursor.shape_width = w as i32;
-            self.cursor.shape_height = and_height as i32;
-            let mut bgra = vec![0u8; w * and_height * 4];
-            for row in 0..and_height {
-                let and_off = row * row_bytes;
-                let xor_off = (row + and_height) * row_bytes;
-                for col in 0..w {
-                    let byte_idx = col / 8;
-                    let bit = 7 - (col % 8);
-                    let and_bit = (raw[and_off + byte_idx] >> bit) & 1;
-                    let xor_bit = (raw[xor_off + byte_idx] >> bit) & 1;
-                    let dst = (row * w + col) * 4;
-                    let (color, alpha) = match (and_bit, xor_bit) {
-                        (1, 0) => (0u8, 0u8),
-                        (0, 0) => (0u8, 255u8),
-                        (0, 1) => (255u8, 255u8),
-                        _      => (128u8, 128u8),
-                    };
-                    bgra[dst]     = color;
-                    bgra[dst + 1] = color;
-                    bgra[dst + 2] = color;
-                    bgra[dst + 3] = alpha;
-                }
-            }
-            self.cursor.shape = bgra;
-        }
-    }
-
-    /// Blit the cursor stored in `self.cursor` onto `self.buffer` (BGRA/RGBA).
-    ///
-    /// Alpha-blends the cursor shape at the current cursor position, clipping
-    /// to the output rectangle. The pixel format follows `self.pixel_format`.
-    fn overlay_cursor(&mut self) {
-        if !self.cursor.visible || self.cursor.shape.is_empty() {
-            return;
-        }
-
-        // Cursor position is in desktop coordinates; convert to output-local.
-        let cur_x = self.cursor.pos_x - self.x - self.cursor.hot_x;
-        let cur_y = self.cursor.pos_y - self.y - self.cursor.hot_y;
-        let cw = self.cursor.shape_width;
-        let ch = self.cursor.shape_height;
-        let fw = self.width as i32;
-        let fh = self.height as i32;
-
-        // Determine the overlapping rectangle.
-        let src_x0 = (-cur_x).max(0);
-        let src_y0 = (-cur_y).max(0);
-        let dst_x0 = cur_x.max(0);
-        let dst_y0 = cur_y.max(0);
-        let blit_w = (cw - src_x0).min(fw - dst_x0);
-        let blit_h = (ch - src_y0).min(fh - dst_y0);
-
-        if blit_w <= 0 || blit_h <= 0 {
-            return;
-        }
-
-        let is_rgba = self.pixel_format == "rgba";
-
-        for row in 0..blit_h as usize {
-            let sy = (src_y0 as usize + row) * cw as usize;
-            let dy = (dst_y0 as usize + row) * fw as usize;
-            for col in 0..blit_w as usize {
-                let sp = (sy + src_x0 as usize + col) * 4;
-                let dp = (dy + dst_x0 as usize + col) * 4;
-
-                // Cursor shape is always BGRA.
-                let (cb, cg, cr, ca) = (
-                    self.cursor.shape[sp]     as u32,
-                    self.cursor.shape[sp + 1] as u32,
-                    self.cursor.shape[sp + 2] as u32,
-                    self.cursor.shape[sp + 3] as u32,
-                );
-                if ca == 0 {
-                    continue;
-                }
-
-                // Frame buffer may be BGRA or RGBA.
-                let (fb, fg, fr) = if is_rgba {
-                    (self.buffer[dp + 2] as u32,
-                     self.buffer[dp + 1] as u32,
-                     self.buffer[dp]     as u32)
-                } else {
-                    (self.buffer[dp]     as u32,
-                     self.buffer[dp + 1] as u32,
-                     self.buffer[dp + 2] as u32)
-                };
-
-                let inv = 255 - ca;
-                let rb = (cb * ca + fb * inv) / 255;
-                let rg = (cg * ca + fg * inv) / 255;
-                let rr = (cr * ca + fr * inv) / 255;
-
-                if is_rgba {
-                    self.buffer[dp]     = rr as u8;
-                    self.buffer[dp + 1] = rg as u8;
-                    self.buffer[dp + 2] = rb as u8;
-                } else {
-                    self.buffer[dp]     = rb as u8;
-                    self.buffer[dp + 1] = rg as u8;
-                    self.buffer[dp + 2] = rr as u8;
-                }
-                self.buffer[dp + 3] = 255;
-            }
-        }
     }
 }
 
@@ -690,119 +442,40 @@ fn pixel_format_name(format: DXGI_FORMAT) -> Result<&'static str> {
     }
 }
 
-/// One DXGI output together with the adapter that drives it.
-struct DxgiOutput {
-    adapter: IDXGIAdapter1,
-    /// Adapter description, for diagnostics.
-    adapter_name: String,
-    /// `IDXGIOutput1`: what Desktop Duplication needs.
-    output: IDXGIOutput1,
-    desc: DXGI_OUTPUT_DESC,
-}
-
-/// Walk every adapter and every output once, in DXGI order.
-///
-/// Used by both `Capture::list_monitors` and `Capture::new` so a monitor
-/// index means the same thing to the user and to the capture. Enumeration is
-/// deliberately permissive: one output that fails `GetDesc` (or cannot be cast
-/// to `IDXGIOutput1`) is skipped with a warning, and a non-`DXGI_ERROR_NOT_FOUND`
-/// error from `EnumOutputs` no longer abandons the rest of the adapter â€” the
-/// old behaviour could silently hide a monitor. Warnings are printed for every
-/// output we could not read, so a truncated list is never silent.
-fn enumerate_outputs(factory: &IDXGIFactory1) -> Result<Vec<DxgiOutput>> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    }
-
-    let mut outputs: Vec<DxgiOutput> = Vec::new();
+/// Walk the factory in the same order as `list_monitors` and return the
+/// adapter plus output for `monitor_index`.
+fn find_output(factory: &IDXGIFactory1, monitor_index: u32) -> Result<(IDXGIAdapter1, IDXGIOutput1)> {
+    let mut index = 0u32;
     let mut adapter_index = 0u32;
 
     loop {
         let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(adapter_index) } {
             Ok(adapter) => adapter,
             Err(err) if err.code() == DXGI_ERROR_NOT_FOUND => break,
-            // DXGI does not define any ordering after a failure, so stop here
-            // instead of guessing - but do not hide the problem.
-            Err(err) => {
-                eprintln!("warning: EnumAdapters1({adapter_index}) failed: {err}");
-                break;
-            }
+            Err(err) => return Err(err).context("EnumAdapters1 failed"),
         };
         adapter_index += 1;
 
-        let adapter_name = match unsafe { adapter.GetDesc1() } {
-            Ok(desc) => device_name(&desc.Description),
-            Err(err) => {
-                eprintln!("warning: reading adapter {adapter_index} description failed: {err}");
-                format!("adapter {adapter_index}")
-            }
-        };
-
         let mut output_index = 0u32;
-        let mut failures = 0u32;
         loop {
             let output = match unsafe { adapter.EnumOutputs(output_index) } {
-                Ok(output) => {
-                    failures = 0;
-                    output
-                }
+                Ok(output) => output,
                 Err(err) if err.code() == DXGI_ERROR_NOT_FOUND => break,
-                // Some drivers report a real error instead of NOT_FOUND for an
-                // output they cannot expose (a detached display, or one being
-                // reconfigured). Keep trying later outputs rather than giving
-                // up on the whole adapter, but do not spin forever.
-                Err(err) => {
-                    if failures == 0 {
-                        eprintln!(
-                            "warning: EnumOutputs({adapter_index}, {output_index}) on \
-                             '{adapter_name}' failed: {err}; continuing"
-                        );
-                    }
-                    failures += 1;
-                    output_index += 1;
-                    if failures >= 8 {
-                        break;
-                    }
-                    continue;
-                }
+                Err(_) => break,
             };
             output_index += 1;
 
-            let desc = match unsafe { output.GetDesc() } {
-                Ok(desc) => desc,
-                Err(err) => {
-                    eprintln!(
-                        "warning: skipping output {output_index} on '{adapter_name}': \
-                         reading its description failed: {err}"
-                    );
-                    continue;
-                }
-            };
-
-            // Desktop Duplication needs IDXGIOutput1 (Windows 8+); an output
-            // that cannot be cast is not capturable, so leave it out of both
-            // the listing and the selection list.
-            let output: IDXGIOutput1 = match output.cast() {
-                Ok(output) => output,
-                Err(err) => {
-                    eprintln!(
-                        "warning: skipping output {output_index} on '{adapter_name}': \
-                         IDXGIOutput1 cast failed (Windows 8+ required): {err}"
-                    );
-                    continue;
-                }
-            };
-
-            outputs.push(DxgiOutput {
-                adapter: adapter.clone(),
-                adapter_name: adapter_name.clone(),
-                output,
-                desc,
-            });
+            if index == monitor_index {
+                let output: IDXGIOutput1 = output
+                    .cast()
+                    .context("IDXGIOutput -> IDXGIOutput1 cast failed (Windows 8+ required)")?;
+                return Ok((adapter, output));
+            }
+            index += 1;
         }
     }
 
-    Ok(outputs)
+    bail!("monitor index {monitor_index} not found")
 }
 
 fn create_device(adapter: Option<&IDXGIAdapter1>) -> Result<(ID3D11Device, ID3D11DeviceContext)> {

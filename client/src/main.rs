@@ -58,7 +58,8 @@ fn run() -> Result<()> {
     let (width, height) =
         parse_size(&value(&args, "--size").unwrap_or_else(|| "1280x720".to_string()))?;
     let requested_window = value(&args, "--window").map(|text| parse_size(&text)).transpose()?;
-    let mut fullscreen = args.iter().any(|arg| arg == "--fullscreen");
+    // Default to fullscreen for extended display unless a specific window size is requested.
+    let mut fullscreen = args.iter().any(|arg| arg == "--fullscreen") || requested_window.is_none();
     let seconds: u64 = match value(&args, "--seconds") {
         Some(text) => text.parse().context("--seconds must be a number")?,
         None => 0,
@@ -109,11 +110,8 @@ fn run() -> Result<()> {
         .build()
         .map_err(|err| anyhow!("creating the window failed: {err}"))?;
 
-    // Hide the local OS cursor while the client window is in use.
-    // The remote desktop's cursor is captured inside the video stream
-    // (server overlays it into the frame), so the local cursor would
-    // only appear as a confusing duplicate on top of the video.
-    sdl.mouse().show_cursor(false);
+    // Keep the cursor visible so the user can interact smoothly across screens.
+    sdl.mouse().show_cursor(true);
     let mut canvas = window
         .into_canvas()
         .build()
@@ -136,6 +134,7 @@ fn run() -> Result<()> {
     let mut frames_rendered = 0u64;
     let mut decode_total_ms: f32 = 0.0;
     let mut render_total_ms: f32 = 0.0;
+    let mut last_frame_at = Instant::now();
 
     // Input forwarding state.
     let mut input_events_sent: u64 = 0;
@@ -222,17 +221,6 @@ fn run() -> Result<()> {
                     btn_mask = 0;
                     pending_move = None;
                     let _ = input.release_all();
-                    // Restore local cursor while the window is out of focus
-                    // so the user can interact with other applications.
-                    sdl.mouse().show_cursor(true);
-                }
-                Event::Window {
-                    win_event: WindowEvent::FocusGained,
-                    ..
-                } => {
-                    // Hide the local cursor again when the user returns to
-                    // the stream window; the remote cursor is in the video.
-                    sdl.mouse().show_cursor(false);
                 }
                 _ => {}
             }
@@ -260,6 +248,7 @@ fn run() -> Result<()> {
         // Always render the newest frame; anything older is already gone.
         match sink.take_latest() {
             Some(frame) => {
+                last_frame_at = Instant::now();
                 let render_started = Instant::now();
                 texture
                     .update(
@@ -284,7 +273,14 @@ fn run() -> Result<()> {
                 stats.frames_rendered.fetch_add(1, Ordering::Relaxed);
                 frames_rendered += 1;
             }
-            None => std::thread::sleep(Duration::from_millis(1)),
+            None => {
+                std::thread::sleep(Duration::from_millis(1));
+                // When server cuts or stops sending frames, close the client window
+                if frames_rendered > 0 && last_frame_at.elapsed() >= Duration::from_secs(2) {
+                    eprintln!("server stopped (no frames for 2s); closing client display");
+                    break 'outer;
+                }
+            }
         }
 
         if last_report.elapsed() >= Duration::from_secs(1) {
