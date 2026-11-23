@@ -50,6 +50,9 @@ impl Encoder {
     /// - "amf": force AMD AMF
     /// - "libx264": software-only via ffmpeg's libx264 (M2 path, unchanged)
     pub fn new(
+        capture_width: u32,
+        capture_height: u32,
+        pixel_format: &str,
         width: u32,
         height: u32,
         fps: u32,
@@ -65,13 +68,13 @@ impl Encoder {
            .stdout(Stdio::piped())
            .stderr(Stdio::null());
 
-        // Input: raw video from capture. Always use capture size 1920x1080 with bgra.
-        // Scaling to encode size is handled via -vf scale if need_scale.
+        // Input: raw video straight from capture, at the capture's own size and
+        // pixel format. Scaling to the encode size happens via -vf scale below.
         cmd.args(["-f", "rawvideo"])
            .arg("-pixel_format")
-           .arg("bgra")
+           .arg(pixel_format)
            .arg("-video_size")
-           .arg("1920x1080")
+           .arg(format!("{}x{}", capture_width, capture_height))
            .arg("-framerate")
            .arg(fps.to_string())
            .arg("-i")
