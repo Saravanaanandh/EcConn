@@ -148,6 +148,9 @@ impl Decoder {
     pub fn reset(&mut self, width: u32, height: u32) -> Result<()> {
         self.shutdown();
         self.shared.shutdown.store(false, Ordering::Relaxed);
+        if let Ok(mut latest) = self.shared.latest.lock() {
+            *latest = None;
+        }
 
         let mut child = Command::new("ffmpeg")
             .arg("-y")

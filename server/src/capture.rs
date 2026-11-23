@@ -83,6 +83,7 @@ pub struct Capture {
     x: i32,
     y: i32,
     name: String,
+    monitor_index: u32,
     rotation: u32,
     format: DXGI_FORMAT,
     pixel_format: &'static str,
@@ -240,6 +241,7 @@ impl Capture {
             x,
             y,
             name: monitor_name,
+            monitor_index,
             rotation: desc.Rotation.0 as u32,
             format,
             pixel_format,
@@ -340,9 +342,8 @@ impl Capture {
 
         let wait = started.elapsed();
 
-        // Pointer-only updates return a frame with no accumulated desktop
-        // image. Releasing it without a copy keeps the previous buffer.
-        if info.AccumulatedFrames == 0 && info.LastPresentTime == 0 {
+        let force_first_copy = self.brightness == 0.0;
+        if !force_first_copy && info.AccumulatedFrames == 0 && info.LastPresentTime == 0 {
             let _ = unsafe { self.duplication.ReleaseFrame() };
             return Ok(Acquired {
                 new_frame: false,
@@ -408,11 +409,37 @@ impl Capture {
     /// failing) when the desktop is still unavailable, so the caller keeps
     /// retrying on later ticks.
     fn recreate_duplication(&mut self) -> Result<bool> {
-        let device_unknown: IUnknown = self.device.cast()?;
-        let duplication = match unsafe { self.output.DuplicateOutput(&device_unknown) } {
+        unsafe {
+            if let Ok(hdesk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0x1FF)) {
+                let _ = SetThreadDesktop(hdesk);
+                let _ = CloseDesktop(hdesk);
+            }
+        }
+
+        let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
+            Ok(f) => f,
+            Err(_) => return Ok(false),
+        };
+        let (adapter, output) = match find_output(&factory, self.monitor_index) {
+            Ok(pair) => pair,
+            Err(_) => return Ok(false),
+        };
+        let (device, context) = match create_device(Some(&adapter)) {
+            Ok(pair) => pair,
+            Err(_) => return Ok(false),
+        };
+        let device_unknown: IUnknown = match device.cast() {
+            Ok(d) => d,
+            Err(_) => return Ok(false),
+        };
+        let duplication = match unsafe { output.DuplicateOutput(&device_unknown) } {
             Ok(duplication) => duplication,
             Err(_) => return Ok(false),
         };
+
+        self.device = device;
+        self.context = context;
+        self.output = output;
         self.duplication = duplication;
 
         let desc = unsafe { self.duplication.GetDesc() };
@@ -423,15 +450,18 @@ impl Capture {
             return Ok(false);
         }
 
-        if width != self.width || height != self.height || format != self.format {
+        let rot = desc.Rotation.0 as u32;
+
+        if width != self.width || height != self.height || format != self.format || rot != self.rotation {
             self.pixel_format = pixel_format_name(format)?;
             self.staging = create_staging_texture(&self.device, width, height, format)?;
             self.width = width;
             self.height = height;
+            self.rotation = rot;
             self.buffer = vec![0u8; width as usize * height as usize * 4];
             self.brightness = 0.0;
             self.size_changed = true;
-            eprintln!("capture resized to {width}x{height}, rebuilding the encoder");
+            eprintln!("capture resized to {width}x{height} (rotation {rot}), rebuilding the encoder");
         }
 
         Ok(true)

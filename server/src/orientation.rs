@@ -44,6 +44,14 @@ pub fn apply_orientation(
 
     if ok.as_bool() {
         let curr_dmdo = unsafe { dm.Anonymous1.Anonymous2.dmDisplayOrientation };
+        if curr_dmdo == target_dmdo {
+            println!(
+                "monitor {} already at orientation {}° ({}x{})",
+                monitor_name, target_orientation, w_before, h_before
+            );
+            return (w_before, h_before);
+        }
+
         let curr_is_portrait = curr_dmdo == DMDO_90 || curr_dmdo == DMDO_270;
         let target_is_portrait = target_dmdo == DMDO_90 || target_dmdo == DMDO_270;
 

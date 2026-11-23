@@ -295,15 +295,16 @@ fn run() -> Result<()> {
         // Always render the newest frame; anything older is already gone.
         match sink.take_latest() {
             Some(frame) => {
+                let expected_len = pitch * height as usize * 3 / 2;
+                if frame.data.len() != expected_len {
+                    continue;
+                }
                 last_frame_at = Instant::now();
                 let render_started = Instant::now();
-                texture
-                    .update(
-                        None,
-                        &frame.data,
-                        pitch, // IYUV pitch = width in bytes per row (usize)
-                    )
-                    .map_err(|err| anyhow!("uploading a frame failed: {err}"))?;
+                if let Err(err) = texture.update(None, &frame.data, pitch) {
+                    eprintln!("warning: uploading frame failed: {err}");
+                    continue;
+                }
                 if flip {
                     canvas
                         .copy_ex(&texture, None, None, 180.0, None, false, false)
@@ -329,8 +330,8 @@ fn run() -> Result<()> {
             None => {
                 std::thread::sleep(Duration::from_millis(1));
                 // When server cuts or stops sending frames, close the client window
-                if frames_rendered > 0 && last_frame_at.elapsed() >= Duration::from_secs(2) {
-                    eprintln!("server stopped (no frames for 2s); closing client display");
+                if frames_rendered > 0 && last_frame_at.elapsed() >= Duration::from_secs(10) {
+                    eprintln!("server stopped (no frames for 10s); closing client display");
                     break 'outer;
                 }
             }

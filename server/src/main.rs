@@ -212,20 +212,32 @@ fn run() -> Result<()> {
         eprintln!("--virtual is Windows-only; falling back to the primary monitor");
     }
 
+    if orientation != 0 {
+        let monitors = capture::Capture::list_monitors()?;
+        if let Some(m) = monitors.get(monitor_index as usize) {
+            #[cfg(windows)]
+            {
+                let _ = orientation::apply_orientation(&m.name, orientation, width, height);
+            }
+        }
+    }
+
     // Create capture with selected monitor index
     let mut capture = capture::Capture::new(monitor_index)?;
 
-    // Apply initial orientation
-    let monitor_name = capture.name().to_string();
-    let (mut encode_width, mut encode_height) = (width, height);
-    #[cfg(windows)]
-    {
-        let (w, h) = orientation::apply_orientation(&monitor_name, orientation, width, height);
-        encode_width = w;
-        encode_height = h;
-        if orientation != 0 {
-            let _ = capture.force_recreate();
-        }
+    // If user did not explicitly specify width & height, use monitor's native capture resolution
+    let (mut encode_width, mut encode_height) = if value(&args, "--width").is_some() || value(&args, "--height").is_some() {
+        (width, height)
+    } else {
+        (capture.width(), capture.height())
+    };
+    if orientation == 0 {
+        orientation = match capture.rotation() {
+            2 => 90,
+            3 => 180,
+            4 => 270,
+            _ => 0,
+        };
     }
 
     // Print capture info - use the actual captured output's resolution
@@ -389,6 +401,16 @@ fn run() -> Result<()> {
         // A desktop mode change resizes the capture; ffmpeg was told the old
         // input size, so restart it before feeding the new-sized buffer.
         if capture.take_size_change() {
+            if value(&args, "--width").is_none() && value(&args, "--height").is_none() {
+                encode_width = capture.width();
+                encode_height = capture.height();
+            }
+            orientation = match capture.rotation() {
+                2 => 90,
+                3 => 180,
+                4 => 270,
+                _ => 0,
+            };
             need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
             encoder.finish()?;
             encoder = Encoder::new(
@@ -404,9 +426,10 @@ fn run() -> Result<()> {
                 orientation,
             )?;
             println!(
-                "capture is now {}x{}, restarted encoder",
+                "capture is now {}x{} (orientation {}°), restarted encoder",
                 capture.width(),
-                capture.height()
+                capture.height(),
+                orientation
             );
             println!("capture size: {}x{}", capture.width(), capture.height());
             println!("encoder size: {}x{}", encode_width, encode_height);
