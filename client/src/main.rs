@@ -51,7 +51,7 @@ fn run() -> Result<()> {
     let (width, height) =
         parse_size(&value(&args, "--size").unwrap_or_else(|| "1280x720".to_string()))?;
     let requested_window = value(&args, "--window").map(|text| parse_size(&text)).transpose()?;
-    let fullscreen = args.iter().any(|arg| arg == "--fullscreen");
+    let mut fullscreen = args.iter().any(|arg| arg == "--fullscreen");
     let seconds: u64 = match value(&args, "--seconds") {
         Some(text) => text.parse().context("--seconds must be a number")?,
         None => 0,
@@ -133,6 +133,14 @@ fn run() -> Result<()> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'outer,
+                Event::KeyDown {
+                    keycode: Some(Keycode::F11),
+                    ..
+                } => {
+                    // Toggle fullscreen state on F11 press
+                    fullscreen ^= true;
+                    eprintln!("F11 pressed - fullscreen {}", if fullscreen { "enabled" } else { "disabled" });
+                }
                 _ => {}
             }
         }

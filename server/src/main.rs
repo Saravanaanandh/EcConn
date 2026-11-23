@@ -12,6 +12,8 @@
 //!   `--height <H>` (default 720, encode/stream height)
 //!   `--fps <n>` (default 30, frames per second)
 //!   `--encode-path <name>` (default "auto", auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)
+//!   `--monitor <index>` (default 0, DXGI output index to capture (M6))
+//!   `--list-monitors` (print each monitor's index, name, resolution, and position, then exit (M6))
 //!   `--help` (print this help message)
 mod capture;
 mod encoder;
@@ -38,6 +40,8 @@ fn print_help() {
          --height <H>           Encode/stream height in pixels (default: 720)\n\
          --fps <n>              Frames per second (default: 30)\n\
          --encode-path <name>   Video encoder path (default: auto, auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)\n\
+         --monitor <index>      DXGI output index to capture (default: 0) (M6)\n\
+         --list-monitors        Print each monitor's index, name, resolution, and position, then exit (M6)\n\
          --help                 Print this help message"
     );
 }
@@ -95,39 +99,59 @@ fn run() -> Result<()> {
         None => "auto".to_string(),
     };
 
-    // Capture size is always 1920x1080 from Desktop Duplication
-    let capture_width = 1920u32;
-    let capture_height = 1080u32;
-    let need_scale = (width != capture_width) || (height != capture_height);
+    // M6: monitor selection (default 0 = primary)
+    let monitor_index: u32 = value(&args, "--monitor")
+        .unwrap_or_else(|| "0".to_string())
+        .parse()
+        .context("--monitor must be a non-negative integer")?;
 
-    // Runtime diagnostics: show exactly which ports the processes are using.
-    println!(
-        "server: bind {bind}, sending to {dest}, {fps} fps target (keyframe listener on {bind})"
-    );
-
-    // Also print the client-facing ports for the peer test.
-    println!("server_ports: bind={bind} dest={dest}");
-
-    // Print capture/encode size info - ONE consistent line
-    println!(
-        "capture {}x{}, encoding {}x{}",
-        capture_width,
-        capture_height,
-        width,
-        height
-    );
-    if need_scale {
-        println!(
-            "scaling from capture size to encode size via ffmpeg -vf scale={}:{}",
-            width, height
-        );
+    // M6: list monitors and exit
+    if args.iter().any(|a| a == "--list-monitors") {
+        let monitors = capture::Capture::list_monitors()?;
+        for m in monitors {
+            eprintln!(
+                "monitor {}: {}x{} at {}x{}, name='{}'",
+                m.index, m.width, m.height, m.x, m.y, m.name
+            );
+        }
+        std::process::exit(0);
     }
+
+    // Create capture with selected monitor index
+    let mut capture = capture::Capture::new(monitor_index)?;
+
+    // Print capture info - use the actual captured output's resolution and position
+    println!(
+        "capture monitor {}: {}x{} at {}x{}",
+        monitor_index,
+        capture.width(),
+        capture.height(),
+        capture.x(),
+        capture.y()
+    );
 
     let (frames_tx, frames_rx) = sync_channel::<EncodedFrame>(2);
     let force_keyframe = Arc::new(AtomicBool::new(false));
     let net = NetSender::new(bind, dest)?.spawn(frames_rx, force_keyframe.clone());
 
-    let mut capture = capture::Capture::new()?;
+    println!(
+        "server: bind {}, sending to {}, {} fps target (keyframe listener on {})",
+        bind, dest, fps, bind
+    );
+
+    // If --width/--height differ from capture size, we need scaling later
+    let need_scale = (width != capture.width()) || (height != capture.height());
+    if need_scale {
+        println!(
+            "scaling from capture size {}x{} to encode size {}x{} via ffmpeg -vf scale={}:{}",
+            capture.width(),
+            capture.height(),
+            width,
+            height,
+            width,
+            height
+        );
+    }
 
     let mut encoder = Encoder::new(
         width,
@@ -137,6 +161,7 @@ fn run() -> Result<()> {
         &encode_path,
         need_scale,
     )?;
+
     println!("streaming - press Ctrl+C to stop");
 
     let start = Instant::now();

@@ -89,17 +89,17 @@ impl Encoder {
             "nvenc" => {
                 cmd.arg("-c:v").arg("h264_nvenc")
                    .arg("-preset").arg("p1")
-                   .arg("-tune").arg("zero_latency");
+                   .arg("-tune").arg("zerolatency");
             }
             "qsv" => {
                 cmd.arg("-c:v").arg("h264_qsv")
                    .arg("-preset").arg("ultrafast")
-                   .arg("-tune").arg("zero_latency");
+                   .arg("-tune").arg("zerolatency");
             }
             "amf" => {
                 cmd.arg("-c:v").arg("h264_amf")
                    .arg("-preset").arg("quality")
-                   .arg("-tune").arg("low_latency");
+                   .arg("-tune").arg("zerolatency");
             }
             "libx264" | _ => {
                 // Software libx264 path: ultrafast preset, zerolatency tune, no B-frames
@@ -118,6 +118,8 @@ impl Encoder {
 
         // COMMON: output format must be LAST. ffmpeg reads -f h264 pipe:1 after all codec options.
         cmd.arg("-f").arg("h264").arg("pipe:1");
+
+        eprintln!("ffmpeg command: {:#?}", cmd);
 
         eprintln!("encode-path: '{encode_path}'");
 
