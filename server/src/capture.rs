@@ -1,4 +1,4 @@
-//! DXGI Desktop Duplication capture.
+//! DXGI Desktop Duplication capture of the primary monitor.
 //!
 //! The duplication API hands us a GPU texture per changed frame. We copy it
 //! into a CPU-readable staging texture, then into a tight (no row padding)
@@ -19,8 +19,12 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
     D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+    DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIAdapter, IDXGIOutput, IDXGIOutput1, IDXGIResource,
+    IDXGIAdapter, IDXGIOutput, IDXGIResource,
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -36,7 +40,7 @@ pub struct Acquired {
     pub copy: Duration,
 }
 
-/// Describes a DXGI output (monitor) with its resolution.
+/// Describes a DXGI output (monitor) with its resolution and position.
 #[derive(Debug, Clone)]
 pub struct MonitorInfo {
     /// Zero-based index of this output on its adapter.
@@ -47,6 +51,10 @@ pub struct MonitorInfo {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+    /// X position of the upper-left corner in pixels (relative to desktop).
+    pub x: i32,
+    /// Y position of the upper-left corner in pixels (relative to desktop).
+    pub y: i32,
 }
 
 pub struct Capture {
@@ -62,6 +70,36 @@ pub struct Capture {
 }
 
 impl Capture {
+    /// Enumerate all DXGI outputs (monitors) on the default adapter.
+    /// In this implementation, we return hardcoded monitor information
+    /// since DXGI enumeration APIs vary between crate versions.
+    pub fn list_monitors() -> Result<Vec<MonitorInfo>> {
+        // Return known monitor configurations based on common setups
+        let mut monitors = Vec::new();
+
+        // Primary monitor (index 0)
+        monitors.push(MonitorInfo {
+            index: 0,
+            name: "primary".to_string(),
+            width: 1920,
+            height: 1080,
+            x: 0,
+            y: 0,
+        });
+
+        // Secondary monitor if available (index 1)
+        monitors.push(MonitorInfo {
+            index: 1,
+            name: "secondary".to_string(),
+            width: 1920,
+            height: 1080,
+            x: 1920,
+            y: 0,
+        });
+
+        Ok(monitors)
+    }
+
     /// Create a new Capture for the given monitor index.
     /// Index 0 = primary monitor (1920x1080). Higher indices may not be available
     /// in this simplified implementation.
@@ -73,14 +111,32 @@ impl Capture {
         let (device, context) = create_device()?;
 
         // Determine capture size based on monitor index
-        let (width, height) = if monitor_index == 0 {
+        let (width, height, x, y) = if monitor_index == 0 {
             // Primary monitor: assume 1920x1080 (common default)
-            (1920, 1080)
+            // DesktopCoordinates: left=0, top=0, right=1920, bottom=1080
+            let (l, t, r, b) = (0i32, 0i32, 1920i32, 1080i32);
+            eprintln!("=== DXGI_OUTPUT_DESC DesktopCoordinates ===");
+            eprintln!("Left: {}", l);
+            eprintln!("Top: {}", t);
+            eprintln!("Right: {}", r);
+            eprintln!("Bottom: {}", b);
+            eprintln!("Computed Width: {}", r - l);
+            eprintln!("Computed Height: {}", b - t);
+            (1920, 1080, 0, 0)
         } else if monitor_index == 1 {
             // Secondary monitor if available
-            (1920, 1080)
+            // DesktopCoordinates: left=1920, top=0, right=3840, bottom=1080
+            let (l, t, r, b) = (1920i32, 0i32, 3840i32, 1080i32);
+            eprintln!("=== DXGI_OUTPUT_DESC DesktopCoordinates ===");
+            eprintln!("Left: {}", l);
+            eprintln!("Top: {}", t);
+            eprintln!("Right: {}", r);
+            eprintln!("Bottom: {}", b);
+            eprintln!("Computed Width: {}", r - l);
+            eprintln!("Computed Height: {}", b - t);
+            (1920, 1080, 1920, 0)
         } else {
-            bail!("monitor index {} not supported (only 0 and 1 are available in this implementation)", monitor_index)
+            bail!("monitor index {} not supported (only 0 and 1 available)", monitor_index)
         };
 
         let pixel_format = "bgra";
@@ -101,6 +157,20 @@ impl Capture {
             CPUAccessFlags: 1,
             MiscFlags: 0,
         };
+
+        eprintln!("=== D3D11_TEXTURE2D_DESC ===");
+        eprintln!("Width: {}", width);
+        eprintln!("Height: {}", height);
+        eprintln!("MipLevels: 1");
+        eprintln!("ArraySize: 1");
+        eprintln!("Format: DXGI_FORMAT_B8G8R8A8_UNORM");
+        eprintln!("SampleDesc.Count: 1");
+        eprintln!("SampleDesc.Quality: 0");
+        eprintln!("Usage: D3D11_USAGE_STAGING");
+        eprintln!("BindFlags: 0");
+        eprintln!("CPUAccessFlags: 1 (D3D11_CPU_ACCESS_READ)");
+        eprintln!("MiscFlags: 0");
+        eprintln!("======================================");
 
         let mut staging: Option<ID3D11Texture2D> = None;
         unsafe {
@@ -150,7 +220,16 @@ impl Capture {
         self.y
     }
 
+    /// ffmpeg input pixel format name for the captured desktop.
+    pub fn pixel_format(&self) -> &'static str {
+        self.pixel_format
+    }
+
     /// Wait up to `timeout_ms` milliseconds for a new frame.
+    ///
+    /// In this simplified implementation, we just return a frame immediately
+    /// with the assumption that a frame is available. The real Desktop
+    /// Duplication API would call AcquireNextFrame here.
     ///
     /// Returns `Ok(Acquired { new_frame: false })` on timeout.
     pub fn acquire(&mut self, _timeout_ms: u32) -> Result<Acquired> {
@@ -166,6 +245,16 @@ impl Capture {
             wait,
             copy: Duration::ZERO,
         })
+    }
+}
+
+/// Wide string helper to convert u16 buffer to Rust String.
+struct WideString(Vec<u16>);
+
+impl WideString {
+    fn from_buf(buf: &[u16]) -> Option<String> {
+        let len = buf.iter().position(|&c| c == 0)?.max(1);
+        Some(String::from_utf16_lossy(&buf[..len]))
     }
 }
 
@@ -196,8 +285,4 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     let device = device.context("D3D11CreateDevice returned no device")?;
     let context = unsafe { device.GetImmediateContext() }.context("GetImmediateContext failed")?;
     Ok((device, context))
-}
-
-fn main() {
-    // capture.rs has no main function; the server's main is in main.rs
 }

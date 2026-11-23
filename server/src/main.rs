@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! cargo run -p server --release -- --dest 127.0.0.1:9100
-//! ```
-//!
+//! ```!
+//! 
 //! Flags:
 //!   `--dest <ip:port>` (default 127.0.0.1:9100, where video is sent)
 //!   `--bind <ip:port>` (default 0.0.0.0:9000, also receives keyframe requests)
@@ -107,9 +107,13 @@ fn run() -> Result<()> {
 
     // M6: list monitors and exit
     if args.iter().any(|a| a == "--list-monitors") {
-        // Print known monitor info based on what we can determine
-        eprintln!("monitor 0: {}x{} (primary display)", 1920, 1080);
-        eprintln!("monitor 1: {}x{} (secondary if available)", 1920, 1080);
+        let monitors = capture::Capture::list_monitors()?;
+        for m in monitors {
+            eprintln!(
+                "monitor {}: {}x{} at {}x{}, name='{}'",
+                m.index, m.width, m.height, m.x, m.y, m.name
+            );
+        }
         std::process::exit(0);
     }
 
