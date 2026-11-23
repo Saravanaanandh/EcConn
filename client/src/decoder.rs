@@ -246,6 +246,16 @@ fn read_raw_frames(mut stdout: ChildStdout, width: u32, height: u32, shared: Arc
         }
 
         if shared.shutdown.load(Ordering::Relaxed) {
+            // ffmpeg still has buffered frames to flush. Drain the pipe so it
+            // can finish writing and exit cleanly instead of failing with a
+            // broken pipe, then stop.
+            let mut sink = [0u8; 16 * 1024];
+            loop {
+                match stdout.read(&mut sink) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
             return;
         }
     }
