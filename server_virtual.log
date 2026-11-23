@@ -1,0 +1,18 @@
+capture monitor 0: 1920x1080
+server: bind 0.0.0.0:9000, sending to 0.0.0.0:9100, 30 fps target (keyframe listener on 0.0.0.0:9000)
+scaling from capture size 1920x1080 to encode size 1280x720 via ffmpeg -vf scale=1280:720
+streaming - press Ctrl+C to stop
+sent    1 frames,     0 packets,     0.0 kbit/s, last 102 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  1s] frames=24    new=2    brightness=33.95 frame_status=repeat capture copy avg  1.49 ms | wait avg 27.63 ms | encode submit avg 13.21 ms
+[  2s] frames=40    new=3    brightness=33.95 frame_status=repeat capture copy avg  0.59 ms | wait avg 26.56 ms | encode submit avg 37.39 ms
+sent   16 frames,     0 packets,     0.0 kbit/s, last 150 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  3s] frames=49    new=4    brightness=33.95 frame_status=repeat capture copy avg  1.00 ms | wait avg 26.95 ms | encode submit avg 86.86 ms
+sent   31 frames,     0 packets,     0.0 kbit/s, last 155 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  4s] frames=67    new=5    brightness=33.95 frame_status=repeat capture copy avg  0.95 ms | wait avg 33.56 ms | encode submit avg 22.76 ms
+sent   46 frames,     0 packets,     0.0 kbit/s, last 155 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  5s] frames=78    new=6    brightness=33.95 frame_status=repeat capture copy avg  0.77 ms | wait avg 26.49 ms | encode submit avg 66.40 ms
+sent   61 frames,     0 packets,     0.0 kbit/s, last 155 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  6s] frames=89    new=6    brightness=33.95 frame_status=repeat capture copy avg  0.00 ms | wait avg 26.15 ms | encode submit avg 90.75 ms
+sent   76 frames,     0 packets,     0.0 kbit/s, last 155 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+udp sender stopped: 89 frames, 0 packets, 0 keyframe requests
+done: 89 frames written to the encoder, 0 encoder restarts

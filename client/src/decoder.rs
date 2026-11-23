@@ -22,12 +22,6 @@ pub struct DecodedFrame {
     pub decode_ms: f32,
 }
 
-#[derive(Clone)]
-pub struct RenderStats {
-    /// Time from handing the decoded frame to SDL texture upload + present.
-    pub render_ms: f32,
-}
-
 /// Handle used by the renderer to grab the newest decoded frame.
 #[derive(Clone)]
 pub struct FrameSink {
@@ -52,8 +46,6 @@ struct Shared {
     ready: Condvar,
     shutdown: AtomicBool,
     latest: Mutex<Option<DecodedFrame>>,
-    /// Per-frame render stats, overwritten each frame.
-    render_stats: Mutex<Option<RenderStats>>,
 }
 
 pub struct Decoder {
@@ -101,7 +93,6 @@ impl Decoder {
             ready: Condvar::new(),
             shutdown: AtomicBool::new(false),
             latest: Mutex::new(None),
-            render_stats: Mutex::new(None),
         });
 
         let writer = {
@@ -151,11 +142,6 @@ impl Decoder {
             let _ = handle.join();
         }
         let _ = self.child.wait();
-    }
-
-    /// Get the latest per-frame render stats (overwritten each frame).
-    pub fn render_stats(&self) -> Option<RenderStats> {
-        self.shared.render_stats.lock().ok().and_then(|s| s.clone())
     }
 }
 
@@ -237,12 +223,6 @@ fn read_raw_frames(mut stdout: ChildStdout, width: u32, height: u32, shared: Arc
         if let Ok(mut slot) = shared.latest.lock() {
             // Recycle the buffer of the frame we just replaced.
             slot.replace(frame);
-        }
-
-        // Capture render timing start - main.rs will measure until present()
-        let render_start = Instant::now();
-        if let Ok(mut rs) = shared.render_stats.lock() {
-            *rs = Some(RenderStats { render_ms: 0.0 });
         }
 
         if shared.shutdown.load(Ordering::Relaxed) {

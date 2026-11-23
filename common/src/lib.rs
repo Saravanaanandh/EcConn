@@ -11,7 +11,7 @@
 //  10..12  packet_index   u16
 //  12..14  packet_count   u16
 //  14..22  timestamp_us   u64
-// 14..22  payload_len    u16
+//  22..24  payload_len    u16
 // ```
 //
 // Note: Input forwarding datagrams reuse this header format but carry an
@@ -236,8 +236,8 @@ mod tests {
 
     #[test]
     fn input_msg_try_from() {
-        assert_eq!(InputMsg::try_from(0x01), Some(InputMsg::MouseMove));
-        assert_eq!(InputMsg::try_from(0x05), Some(InputMsg::ReleaseAll));
-        assert_eq!(InputMsg::try_from(0xFF), None);
+        assert_eq!(InputMsg::try_from(0x01), Ok(InputMsg::MouseMove));
+        assert_eq!(InputMsg::try_from(0x05), Ok(InputMsg::ReleaseAll));
+        assert_eq!(InputMsg::try_from(0xFF), Err(()));
     }
 }

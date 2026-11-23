@@ -22,6 +22,7 @@
 //!   `--help` (print this help message)
 mod capture;
 mod encoder;
+mod input;
 mod net;
 #[cfg(windows)]
 mod driver_install;
@@ -217,7 +218,13 @@ fn run() -> Result<()> {
 
     let (frames_tx, frames_rx) = sync_channel::<EncodedFrame>(2);
     let force_keyframe = Arc::new(AtomicBool::new(false));
-    let net = NetSender::new(bind, dest)?.spawn(frames_rx, force_keyframe.clone());
+    let monitor_rect = input::MonitorRect {
+        left: capture.x(),
+        top: capture.y(),
+        width: capture.width(),
+        height: capture.height(),
+    };
+    let net = NetSender::new(bind, dest)?.spawn(frames_rx, force_keyframe.clone(), monitor_rect);
 
     println!(
         "server: bind {}, sending to {}, {} fps target (keyframe listener on {})",
@@ -260,8 +267,8 @@ fn run() -> Result<()> {
     let mut frames_written = 0u64;
     let mut new_frames = 0u64;
     let mut restarts = 0u64;
-    let mut last_brightness: f32 = 0.0;
-    let mut frame_is_new: &'static str = "new";
+    let mut last_brightness: f32;
+    let mut frame_is_new: &'static str;
     let mut last_report = Instant::now();
     // Absolute deadlines, so a slow frame is paid back over the next ones
     // instead of stretching every frame by its own cost.

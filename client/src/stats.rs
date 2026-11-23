@@ -12,7 +12,6 @@ pub struct Stats {
     pub frames_replaced: AtomicU64,
     pub keyframe_requests: AtomicU64,
     pub frames_rendered: AtomicU64,
-    pub rejected_packets: AtomicU64,
 
     assembly_ms: Mutex<Vec<f32>>,
     decode_ms: Mutex<Vec<f32>>,

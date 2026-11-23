@@ -161,6 +161,11 @@ impl Encoder {
     pub fn finish(&mut self) -> Result<()> {
         let _ = self.stdin.take();
         let status = self.child.wait()?;
+        // ffmpeg is gone, so the reader sees EOF and exits; join it so no
+        // thread outlives the encoder (important on keyframe restarts).
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
         if !status.success() {
             bail!("ffmpeg exited with {status}");
         }

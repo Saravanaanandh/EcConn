@@ -1,0 +1,2 @@
+ffmpeg command: "ffmpeg" "-f" "rawvideo" "-pixel_format" "bgra" "-video_size" "1920x1080" "-framerate" "30" "-i" "-" "-vf" "scale=1280:720" "-c:v" "libx264" "-preset" "ultrafast" "-tune" "zerolatency" "-g" "15" "-bf" "0" "-x264-params" "aud=1:repeat-headers=1:keyint=15:min-keyint=15:scenecut=0:bframes=0" "-f" "h264" "pipe:1"
+encode-path: 'auto'

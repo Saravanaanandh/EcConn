@@ -14,6 +14,7 @@ use common::{
 };
 
 use crate::encoder::EncodedFrame;
+use crate::input::{InputInjector, MonitorRect};
 
 pub struct NetSender {
     socket: UdpSocket,
@@ -40,14 +41,15 @@ impl NetSender {
         self,
         frames: Receiver<EncodedFrame>,
         force_keyframe: Arc<AtomicBool>,
+        rect: MonitorRect,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("udp-sender".into())
-            .spawn(move || self.run(frames, force_keyframe))
+            .spawn(move || self.run(frames, force_keyframe, rect))
             .expect("spawning the udp sender thread failed")
     }
 
-    fn run(self, frames: Receiver<EncodedFrame>, force_keyframe: Arc<AtomicBool>) {
+    fn run(self, frames: Receiver<EncodedFrame>, force_keyframe: Arc<AtomicBool>, rect: MonitorRect) {
         let mut datagram = [0u8; DATAGRAM_SIZE];
         let mut control = [0u8; 64];
         let mut frame_id: u32 = 0;
@@ -56,6 +58,7 @@ impl NetSender {
         let mut sent_bytes = 0u64;
         let mut keyframe_requests = 0u64;
         let mut last_report = Instant::now();
+        let mut input = InputInjector::new(rect);
 
         loop {
             // Drain control datagrams. A timeout/would-block error just means
@@ -68,12 +71,21 @@ impl NetSender {
                                 keyframe_requests += 1;
                                 force_keyframe.store(true, Ordering::Relaxed);
                                 println!("keyframe request from {from}");
+                            } else if header.flags == 0 && header.payload_len >= 14 {
+                                // Input datagram: same header, input payload.
+                                let end = HEADER_LEN + header.payload_len as usize;
+                                if len >= end {
+                                    input.process(&control[HEADER_LEN..end]);
+                                }
                             }
                         }
                     }
                     Err(_) => break,
                 }
             }
+
+            // Release held keys/buttons if the client went quiet.
+            input.tick();
 
             let frame = match frames.recv_timeout(Duration::from_millis(5)) {
                 Ok(frame) => frame,
@@ -114,19 +126,25 @@ impl NetSender {
 
             if last_report.elapsed() >= Duration::from_secs(1) {
                 let seconds = last_report.elapsed().as_secs_f64();
+                let (in_recv, in_inj, in_rej) = input.take_counters();
                 println!(
-                    "sent {:>4} frames, {:>5} packets, {:>7.1} kbit/s, last {} packets, keyframe_requests {}",
+                    "sent {:>4} frames, {:>5} packets, {:>7.1} kbit/s, last {} packets, keyframe_requests {} | input received {}/s injected {}/s rejected {}",
                     sent_frames,
                     sent_packets,
                     sent_bytes as f64 * 8.0 / 1000.0 / seconds,
                     count,
-                    keyframe_requests
+                    keyframe_requests,
+                    in_recv,
+                    in_inj,
+                    in_rej
                 );
                 last_report = Instant::now();
                 sent_bytes = 0;
             }
         }
 
+        // Never leave keys or buttons stuck down when the stream ends.
+        input.release_all();
         println!(
             "udp sender stopped: {sent_frames} frames, {sent_packets} packets, {keyframe_requests} keyframe requests"
         );

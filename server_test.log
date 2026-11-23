@@ -1,0 +1,51 @@
+capture monitor 0: 1920x1080
+server: bind 0.0.0.0:9000, sending to 127.0.0.1:9100, 30 fps target (keyframe listener on 0.0.0.0:9000)
+scaling from capture size 1920x1080 to encode size 1280x720 via ffmpeg -vf scale=1280:720
+ffmpeg command: "ffmpeg" "-f" "rawvideo" "-pixel_format" "bgra" "-video_size" "1920x1080" "-framerate" "30" "-i" "-" "-vf" "scale=1280:720" "-c:v" "libx264" "-preset" "ultrafast" "-tune" "zerolatency" "-g" "15" "-bf" "0" "-x264-params" "aud=1:repeat-headers=1:keyint=15:min-keyint=15:scenecut=0:bframes=0" "-f" "h264" "pipe:1"
+encode-path: 'auto'
+streaming - press Ctrl+C to stop
+sent    1 frames,    79 packets,   497.7 kbit/s, last 79 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  1s] frames=20    new=2    brightness=29.29 frame_status=repeat capture copy avg  1.61 ms | wait avg 26.44 ms | encode submit avg 20.22 ms
+sent   32 frames,   411 packets,  3004.3 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  2s] frames=49    new=3    brightness=29.29 frame_status=repeat capture copy avg  0.61 ms | wait avg 29.84 ms | encode submit avg  4.07 ms
+sent   63 frames,   688 packets,  2398.2 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  3s] frames=79    new=4    brightness=29.29 frame_status=repeat capture copy avg  0.45 ms | wait avg 30.09 ms | encode submit avg  2.63 ms
+sent   93 frames,   964 packets,  2439.5 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  4s] frames=110   new=5    brightness=29.29 frame_status=repeat capture copy avg  0.40 ms | wait avg 30.64 ms | encode submit avg  2.32 ms
+sent  124 frames,  1241 packets,  2376.3 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  5s] frames=140   new=6    brightness=29.29 frame_status=repeat capture copy avg  0.34 ms | wait avg 29.90 ms | encode submit avg  3.15 ms
+sent  155 frames,  1518 packets,  2433.4 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  6s] frames=171   new=26   brightness=29.24 frame_status=new capture copy avg  8.15 ms | wait avg 11.14 ms | encode submit avg  4.56 ms
+sent  185 frames,  1792 packets,  2445.0 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  7s] frames=201   new=46   brightness=29.24 frame_status=repeat capture copy avg  9.05 ms | wait avg 10.61 ms | encode submit avg  5.26 ms
+sent  214 frames,  2065 packets,  2359.6 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  8s] frames=221   new=50   brightness=78.84 frame_status=new capture copy avg 17.15 ms | wait avg 26.74 ms | encode submit avg  6.23 ms
+sent  222 frames,  2099 packets,   230.1 kbit/s, last 5 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[  9s] frames=230   new=53   brightness=22.66 frame_status=repeat capture copy avg 20.77 ms | wait avg 77.35 ms | encode submit avg 15.69 ms
+sent  245 frames,  2298 packets,  1775.4 kbit/s, last 6 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 10s] frames=254   new=65   brightness=37.25 frame_status=new capture copy avg 12.19 ms | wait avg 23.78 ms | encode submit avg  5.71 ms
+sent  266 frames,  2511 packets,  1923.3 kbit/s, last 8 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 11s] frames=277   new=88   brightness=40.57 frame_status=new capture copy avg 20.24 ms | wait avg 13.64 ms | encode submit avg  9.00 ms
+sent  293 frames,  2837 packets,  2910.4 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 12s] frames=302   new=111  brightness=40.71 frame_status=new capture copy avg 20.64 ms | wait avg  9.30 ms | encode submit avg  7.83 ms
+sent  313 frames,  3015 packets,  1580.1 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 13s] frames=322   new=127  brightness=40.72 frame_status=new capture copy avg 28.57 ms | wait avg 11.41 ms | encode submit avg 11.03 ms
+sent  339 frames,  3346 packets,  2987.4 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 14s] frames=350   new=147  brightness=40.72 frame_status=new capture copy avg 13.66 ms | wait avg 13.24 ms | encode submit avg  7.11 ms
+sent  369 frames,  3681 packets,  3003.6 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 15s] frames=381   new=178  brightness=40.71 frame_status=new capture copy avg 16.47 ms | wait avg 10.46 ms | encode submit avg  4.52 ms
+sent  399 frames,  4015 packets,  3020.9 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 16s] frames=411   new=207  brightness=40.72 frame_status=new capture copy avg 15.28 ms | wait avg  9.15 ms | encode submit avg  5.60 ms
+sent  427 frames,  4346 packets,  2992.5 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 17s] frames=438   new=234  brightness=40.72 frame_status=new capture copy avg 17.00 ms | wait avg 13.47 ms | encode submit avg  4.84 ms
+sent  454 frames,  4675 packets,  2945.7 kbit/s, last 1 packets, keyframe_requests 0 | input received 0/s injected 0/s rejected 0
+[ 18s] frames=466   new=262  brightness=40.72 frame_status=new capture copy avg 17.67 ms | wait avg 11.57 ms | encode submit avg  5.61 ms
+keyframe request from 127.0.0.1:9100
+ffmpeg command: "ffmpeg" "-f" "rawvideo" "-pixel_format" "bgra" "-video_size" "1920x1080" "-framerate" "30" "-i" "-" "-vf" "scale=1280:720" "-c:v" "libx264" "-preset" "ultrafast" "-tune" "zerolatency" "-g" "15" "-bf" "0" "-x264-params" "aud=1:repeat-headers=1:keyint=15:min-keyint=15:scenecut=0:bframes=0" "-f" "h264" "pipe:1"
+encode-path: 'auto'
+restarted encoder for keyframe request #1
+sent  475 frames,  4991 packets,  2835.2 kbit/s, last 10 packets, keyframe_requests 1 | input received 4/s injected 4/s rejected 0
+[ 19s] frames=487   new=280  brightness=40.76 frame_status=new capture copy avg 17.47 ms | wait avg  7.82 ms | encode submit avg  9.70 ms
+sent  503 frames,  5351 packets,  3269.8 kbit/s, last 4 packets, keyframe_requests 1 | input received 0/s injected 0/s rejected 0
+udp sender stopped: 505 frames, 5361 packets, 1 keyframe requests
+done: 505 frames written to the encoder, 1 encoder restarts
