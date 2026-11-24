@@ -61,6 +61,12 @@ fn run() -> Result<()> {
     // Default to fullscreen for extended display unless a specific window size is requested.
     let mut fullscreen = args.iter().any(|arg| arg == "--fullscreen") || requested_window.is_none();
     let flip = args.iter().any(|arg| arg == "--flip");
+    let rotate_arg: u16 = value(&args, "--rotate")
+        .or_else(|| value(&args, "--rotation"))
+        .map(|s| s.parse::<u16>().context("--rotate must be 0, 90, 180, or 270"))
+        .transpose()?
+        .unwrap_or(0);
+    let mut client_rotate: u16 = rotate_arg;
     let orientation_arg: Option<u16> = value(&args, "--orientation")
         .map(|s| s.parse().context("--orientation must be 0, 90, 180, or 270"))
         .transpose()?;
@@ -95,9 +101,10 @@ fn run() -> Result<()> {
     };
 
     println!(
-        "client: video on {bind}, keyframe requests to {server}, stream {width}x{height}, window {window_width}x{window_height}{}{}",
+        "client: video on {bind}, keyframe requests to {server}, stream {width}x{height}, window {window_width}x{window_height}{}{}{}",
         if fullscreen { " (fullscreen)" } else { "" },
-        if flip { " (flip 180°)" } else { "" }
+        if flip { " (flip 180°)" } else { "" },
+        if client_rotate != 0 { format!(" (rotate {}°)", client_rotate) } else { "".to_string() }
     );
     println!("client size: {width}x{height}");
 
@@ -187,18 +194,32 @@ fn run() -> Result<()> {
                     }
                 }
                 Event::KeyDown {
-                    keycode: Some(Keycode::R),
+                    keycode: Some(Keycode::C),
                     repeat: false,
                     ..
                 } => {
-                    current_orientation = match current_orientation {
-                        0 => 90,
-                        90 => 180,
-                        180 => 270,
-                        _ => 0,
-                    };
-                    println!("requesting orientation change to {current_orientation}°");
-                    count_send(input.set_orientation(current_orientation), &mut input_events_sent, "set orientation");
+                    client_rotate = (client_rotate + 90) % 360;
+                    println!("client-side screen rotation changed to {client_rotate}°");
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::R),
+                    keymod,
+                    repeat: false,
+                    ..
+                } => {
+                    if keymod.contains(sdl2::keyboard::Mod::LSHIFTMOD) || keymod.contains(sdl2::keyboard::Mod::RSHIFTMOD) {
+                        client_rotate = (client_rotate + 90) % 360;
+                        println!("client-side screen rotation changed to {client_rotate}°");
+                    } else {
+                        current_orientation = match current_orientation {
+                            0 => 90,
+                            90 => 180,
+                            180 => 270,
+                            _ => 0,
+                        };
+                        println!("requesting orientation change to {current_orientation}°");
+                        count_send(input.set_orientation(current_orientation), &mut input_events_sent, "set orientation");
+                    }
                 }
                 Event::KeyDown {
                     scancode: Some(sc),
@@ -260,13 +281,25 @@ fn run() -> Result<()> {
             if last_mouse_send.elapsed() >= Duration::from_millis(MOUSE_MOVE_INTERVAL_MS) {
                 pending_move = None;
                 let (ww, wh) = canvas.window().size();
-                let (eff_x, eff_y) = if flip {
-                    ((ww as i32 - 1 - x).max(0), (wh as i32 - 1 - y).max(0))
-                } else {
-                    (x, y)
+                let effective_angle = (client_rotate + if flip { 180 } else { 0 }) % 360;
+                let (nx, ny) = match effective_angle {
+                    90 => (
+                        normalize_coord(y, wh),
+                        normalize_coord((ww as i32 - 1 - x).max(0), ww),
+                    ),
+                    180 => (
+                        normalize_coord((ww as i32 - 1 - x).max(0), ww),
+                        normalize_coord((wh as i32 - 1 - y).max(0), wh),
+                    ),
+                    270 => (
+                        normalize_coord((wh as i32 - 1 - y).max(0), wh),
+                        normalize_coord(x, ww),
+                    ),
+                    _ => (
+                        normalize_coord(x, ww),
+                        normalize_coord(y, wh),
+                    ),
                 };
-                let nx = normalize_coord(eff_x, ww);
-                let ny = normalize_coord(eff_y, wh);
                 count_send(input.mouse_move(nx, ny), &mut input_events_sent, "mouse move");
                 last_mouse_send = Instant::now();
             }
@@ -315,14 +348,42 @@ fn run() -> Result<()> {
                     eprintln!("warning: uploading frame failed: {err}");
                     continue;
                 }
-                if flip {
-                    canvas
-                        .copy_ex(&texture, None, None, 180.0, None, false, false)
-                        .map_err(|err| anyhow!("drawing flipped frame failed: {err}"))?;
-                } else {
-                    canvas
-                        .copy(&texture, None, None)
-                        .map_err(|err| anyhow!("drawing a frame failed: {err}"))?;
+                let effective_angle = (client_rotate + if flip { 180 } else { 0 }) % 360;
+                match effective_angle {
+                    90 => {
+                        let (ww, wh) = canvas.window().size();
+                        let dst_rect = sdl2::rect::Rect::new(
+                            (ww as i32 - wh as i32) / 2,
+                            (wh as i32 - ww as i32) / 2,
+                            wh,
+                            ww,
+                        );
+                        canvas
+                            .copy_ex(&texture, None, Some(dst_rect), 90.0, None, false, false)
+                            .map_err(|err| anyhow!("drawing rotated frame failed: {err}"))?;
+                    }
+                    180 => {
+                        canvas
+                            .copy_ex(&texture, None, None, 180.0, None, false, false)
+                            .map_err(|err| anyhow!("drawing flipped frame failed: {err}"))?;
+                    }
+                    270 => {
+                        let (ww, wh) = canvas.window().size();
+                        let dst_rect = sdl2::rect::Rect::new(
+                            (ww as i32 - wh as i32) / 2,
+                            (wh as i32 - ww as i32) / 2,
+                            wh,
+                            ww,
+                        );
+                        canvas
+                            .copy_ex(&texture, None, Some(dst_rect), 270.0, None, false, false)
+                            .map_err(|err| anyhow!("drawing rotated frame failed: {err}"))?;
+                    }
+                    _ => {
+                        canvas
+                            .copy(&texture, None, None)
+                            .map_err(|err| anyhow!("drawing a frame failed: {err}"))?;
+                    }
                 }
                 canvas.present();
 

@@ -632,7 +632,6 @@ mod tests {
     fn test_change_display_settings_live() {
         use windows::Win32::Devices::Display::*;
         use windows::Win32::Graphics::Gdi::*;
-        use windows::core::HSTRING;
         unsafe {
             let mut num_paths = 0u32;
             let mut num_modes = 0u32;
@@ -672,19 +671,21 @@ mod tests {
                 println!("Path {}: gdi='{}', monitor='{}', rotation={:?}", idx, gdi_name, monitor_friendly, p.targetInfo.rotation);
             }
 
-            // Find VDD path (Path 2 or gdi '\\.\DISPLAY11')
+            // Find VDD path
             let vdd_idx = paths.iter().position(|p| {
-                let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
-                source_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-                source_name.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
-                source_name.header.adapterId = p.sourceInfo.adapterId;
-                source_name.header.id = p.sourceInfo.id;
-                let _ = DisplayConfigGetDeviceInfo(&mut source_name.header);
-                let gdi_name = String::from_utf16_lossy(&source_name.viewGdiDeviceName).trim_matches('\0').to_string();
-                gdi_name == r"\\.\DISPLAY11"
-            }).expect("found VDD path");
+                let mut target_name = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+                target_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                target_name.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+                target_name.header.adapterId = p.targetInfo.adapterId;
+                target_name.header.id = p.targetInfo.id;
+                let _ = DisplayConfigGetDeviceInfo(&mut target_name.header);
+                let monitor_friendly = String::from_utf16_lossy(&target_name.monitorFriendlyDeviceName).trim_matches('\0').to_string();
+                monitor_friendly.contains("VDD")
+            });
 
-            println!("Found VDD at index {}", vdd_idx);
+            if let Some(vdd_idx) = vdd_idx {
+                println!("Found VDD at index {}", vdd_idx);
+            }
 
             let name_wide: Vec<u16> = format!("{}\0", r"\\.\DISPLAY11").encode_utf16().collect();
             let mut dm = DEVMODEW::default();
