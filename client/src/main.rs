@@ -273,16 +273,20 @@ fn run() -> Result<()> {
 
         // Check for server display configuration updates
         while let Ok((new_w, new_h, new_orient, _new_rot)) = config_rx.try_recv() {
-            println!("client size: {new_w}x{new_h}");
             current_orientation = new_orient;
-            width = new_w;
-            height = new_h;
-            pitch = width as usize;
-            texture = texture_creator
-                .create_texture_streaming(PixelFormatEnum::IYUV, width, height)
-                .map_err(|err| anyhow!("recreating the video texture failed: {err}"))?;
-            if !fullscreen {
-                let _ = canvas.window_mut().set_size(width, height);
+            if new_w != width || new_h != height {
+                println!(
+                    "client size: {new_w}x{new_h} (orientation {new_orient}°)"
+                );
+                width = new_w;
+                height = new_h;
+                pitch = width as usize;
+                texture = texture_creator
+                    .create_texture_streaming(PixelFormatEnum::IYUV, width, height)
+                    .map_err(|err| anyhow!("recreating the video texture failed: {err}"))?;
+                if !fullscreen {
+                    let _ = canvas.window_mut().set_size(width, height);
+                }
             }
         }
 

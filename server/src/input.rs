@@ -32,7 +32,6 @@ pub struct MonitorRect {
 
 pub struct InputInjector {
     rect: MonitorRect,
-    orientation: u16,
     /// Session token; 0 until the first datagram establishes it.
     token: u64,
     last_seq: u16,
@@ -51,7 +50,6 @@ impl InputInjector {
     pub fn new(rect: MonitorRect) -> Self {
         Self {
             rect,
-            orientation: 0,
             token: 0,
             last_seq: 0,
             have_seq: false,
@@ -67,11 +65,6 @@ impl InputInjector {
     /// Update monitor rectangle on resize.
     pub fn set_rect(&mut self, rect: MonitorRect) {
         self.rect = rect;
-    }
-
-    /// Update display orientation.
-    pub fn set_orientation(&mut self, orientation: u16) {
-        self.orientation = orientation;
     }
 
     /// Validate and apply one input payload (the bytes after the header).
@@ -124,13 +117,10 @@ impl InputInjector {
             InputMsg::MouseMove => {
                 let x = u16::from_be_bytes([payload[13], payload[14]]);
                 let y = u16::from_be_bytes([payload[15], payload[16]]);
-                let (mx, my) = match self.orientation {
-                    90 if self.rect.width > self.rect.height => (y, 65535 - x),
-                    180 => (65535 - x, 65535 - y),
-                    270 if self.rect.width > self.rect.height => (65535 - y, x),
-                    _ => (x, y),
-                };
-                self.injected += platform::mouse_move(self.rect, mx, my);
+                // The stream is already rotated upright by the encoder and
+                // the monitor rect is the visible desktop rectangle, so the
+                // normalized coordinates map straight through.
+                self.injected += platform::mouse_move(self.rect, x, y);
             }
             InputMsg::MouseBtn => {
                 let mask = payload[13] & 0x07;

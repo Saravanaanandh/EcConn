@@ -46,13 +46,17 @@ impl NetSender {
         config_rx: Receiver<(u32, u32, u16, u8, MonitorRect)>,
         rect: MonitorRect,
         orientation: u16,
+        rotation: u8,
+        frame_width: u32,
+        frame_height: u32,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("udp-sender".into())
-            .spawn(move || self.run(frames, force_keyframe, pending_orientation, config_rx, rect, orientation))
+            .spawn(move || self.run(frames, force_keyframe, pending_orientation, config_rx, rect, orientation, rotation, frame_width, frame_height))
             .expect("spawning the udp sender thread failed")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run(
         self,
         frames: Receiver<EncodedFrame>,
@@ -61,6 +65,9 @@ impl NetSender {
         config_rx: Receiver<(u32, u32, u16, u8, MonitorRect)>,
         rect: MonitorRect,
         orientation: u16,
+        rotation: u8,
+        frame_width: u32,
+        frame_height: u32,
     ) {
         let mut datagram = [0u8; DATAGRAM_SIZE];
         let mut control = [0u8; 64];
@@ -71,9 +78,11 @@ impl NetSender {
         let mut keyframe_requests = 0u64;
         let mut last_report = Instant::now();
         let mut input = InputInjector::new(rect);
-        input.set_orientation(orientation);
 
-        let mut current_config = (rect.width, rect.height, orientation, 1u8);
+        // DisplayConfig describes the encoded frame (what the decoder must
+        // output); `rect` is only the monitor rectangle used for input.
+        let mut current_config = (frame_width, frame_height, orientation, rotation);
+        let mut last_config_sent = Instant::now();
 
         // Helper closure to send DisplayConfig packet to dest
         let send_config = |socket: &UdpSocket, dest: SocketAddr, w: u32, h: u32, orient: u16, rot: u8, start: Instant| {
@@ -99,10 +108,10 @@ impl NetSender {
             while let Ok((w, h, orient, rot, new_rect)) = config_rx.try_recv() {
                 current_config = (w, h, orient, rot);
                 input.set_rect(new_rect);
-                input.set_orientation(orient);
                 // Send twice for UDP redundancy
                 send_config(&self.socket, self.dest, w, h, orient, rot, self.start);
                 send_config(&self.socket, self.dest, w, h, orient, rot, self.start);
+                last_config_sent = Instant::now();
             }
 
             // Drain control datagrams. A timeout/would-block error just means
@@ -180,6 +189,23 @@ impl NetSender {
 
             sent_frames += 1;
             frame_id = frame_id.wrapping_add(1);
+
+            // Resend the display config once a second. The startup packet can
+            // race the client binding its socket; a client that missed it
+            // would otherwise decode at the wrong size until it next asks for
+            // a keyframe.
+            if last_config_sent.elapsed() >= Duration::from_secs(1) {
+                send_config(
+                    &self.socket,
+                    self.dest,
+                    current_config.0,
+                    current_config.1,
+                    current_config.2,
+                    current_config.3,
+                    self.start,
+                );
+                last_config_sent = Instant::now();
+            }
 
             if last_report.elapsed() >= Duration::from_secs(1) {
                 let seconds = last_report.elapsed().as_secs_f64();

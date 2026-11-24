@@ -217,7 +217,7 @@ fn run() -> Result<()> {
         if let Some(m) = monitors.get(monitor_index as usize) {
             #[cfg(windows)]
             {
-                let _ = orientation::apply_orientation(&m.name, orientation, width, height);
+                let _ = orientation::apply_orientation(&m.name, orientation.into(), width, height);
             }
         }
     }
@@ -266,7 +266,10 @@ fn run() -> Result<()> {
         pending_orientation.clone(),
         config_rx,
         monitor_rect,
-        orientation,
+        orientation.into(),
+        capture.rotation() as u8,
+        encode_width,
+        encode_height,
     );
 
     println!(
@@ -298,7 +301,7 @@ fn run() -> Result<()> {
         frames_tx.clone(),
         &encode_path,
         need_scale,
-        orientation,
+        orientation.into(),
     )?;
 
     println!("streaming - press Ctrl+C to stop");
@@ -350,7 +353,7 @@ fn run() -> Result<()> {
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
-                orientation,
+                orientation.into(),
             )?;
             println!("capture size: {}x{}", capture.width(), capture.height());
             println!("encoder size: {}x{}", encode_width, encode_height);
@@ -360,7 +363,7 @@ fn run() -> Result<()> {
                 width: encode_width,
                 height: encode_height,
             };
-            let _ = config_tx.send((encode_width, encode_height, orientation, capture.rotation() as u8, new_rect));
+            let _ = config_tx.send((encode_width, encode_height, orientation.into(), capture.rotation() as u8, new_rect));
             next_deadline = Instant::now() + Duration::from_secs_f64(1.0 / fps as f64);
         }
 
@@ -379,7 +382,7 @@ fn run() -> Result<()> {
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
-                orientation,
+                orientation.into(),
             )?;
             println!("restarted encoder for keyframe request #{restarts}");
             // Do not try to make up the time the restart consumed.
@@ -423,7 +426,7 @@ fn run() -> Result<()> {
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
-                orientation,
+                orientation.into(),
             )?;
             println!(
                 "capture is now {}x{} (orientation {}°), restarted encoder",
@@ -439,7 +442,7 @@ fn run() -> Result<()> {
                 width: capture.width(),
                 height: capture.height(),
             };
-            let _ = config_tx.send((capture.width(), capture.height(), orientation, capture.rotation() as u8, new_rect));
+            let _ = config_tx.send((capture.width(), capture.height(), orientation.into(), capture.rotation() as u8, new_rect));
         }
 
         if acquired.new_frame {

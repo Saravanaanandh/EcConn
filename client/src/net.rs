@@ -209,8 +209,11 @@ impl Receiver {
                             self.partial.clear();
                             self.awaiting_keyframe = true;
                             self.request_keyframe();
-                            let _ = self.config_tx.send((w, h, orient, rot));
                         }
+                        // Always inform the render thread: a 180° rotation
+                        // keeps the same size but updates the orientation
+                        // state used by the R key.
+                        let _ = self.config_tx.send((w, h, orient, rot));
                         return;
                     }
                 }
