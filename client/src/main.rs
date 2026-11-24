@@ -1,41 +1,48 @@
-// Shared protocol types for the `lowlat-screen` workspace.
+//! M2 client: receive H.264 over UDP, decode with ffmpeg, show in an SDL window.
+//!
+//! ```text
+//! cargo run -p client --release -- --server 192.168.50.1:9000
+//! ```
+//!
+//! Flags: `--bind <ip:port>` (default 0.0.0.0:9100, where video arrives),
+//! `--server <ip:port>` (default 127.0.0.1:9000, where keyframe requests and
+//! input events go), `--size <WxH>` (default 1280x720, must match the
+//! server's capture size), `--window <WxH>` (default: fit the desktop),
+//! `--fullscreen`, `--seconds <n>` (stop after n seconds, for testing).
+//!
+//! Mouse and keyboard events over the video window are forwarded to the
+//! server as `common::InputMsg` datagrams and injected on the captured
+//! monitor. F11 toggles fullscreen; Esc or closing the window quits.
 
-// Video is sent as one H.264 access unit per frame, split across UDP
-// datagrams. Every datagram carries the fixed 24-byte header below.
+mod decoder;
+mod net;
+mod stats;
 
-// ```text
-//  0..4   magic          u32  0x4C4C5332 (\"LLS2\")
-//  4..5   version        u8
-//  5..6   flags          u8   bit0 keyframe, bit1 keyframe request
-//  6..10  frame_id       u32
-//  10..12  packet_index   u16
-//  12..14  packet_count   u16
-//  14..22  timestamp_us   u64
-//  22..24  payload_len    u16
-// ```
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-// Note: Input forwarding datagrams reuse this header format but carry an
-// input payload described by `common::InputMsg` after the header.
+use anyhow::{anyhow, Context, Result};
+use common::{DEFAULT_CLIENT_PORT, DEFAULT_SERVER_PORT};
+use sdl2::event::{Event, WindowEvent};
+use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton;
+use sdl2::pixels::PixelFormatEnum;
+use sdl2::video::FullscreenType;
 
-// ```text
-//  0       msg_type       u8   see InputMsg below
-//  1..3    reserved       u8[2]  (zero-filled for future use)
-//  3..5    seq_id         u16  monotonically increasing per-session
-//  5..13   session_token  u64   identifies the streaming session
-// 13..    payload       varies by msg_type
-// ```
+use crate::decoder::Decoder;
+use crate::net::Receiver;
+use crate::stats::{take_counter, Stats};
 
-// ```rust
-// use common::{InputMsg, input_msg_encode, input_msg_decode};
+/// Coalesce mouse moves: send at most one position every this many ms.
+const MOUSE_MOVE_INTERVAL_MS: u64 = 8;
 
-// let mut buf = [0u8; 38]; // 24-byte header + 14-byte payload
-// input_msg_encode(InputMsg::MouseMove, 42, 0x123456789abcdef0, &mut buf[24..]);
-// ```
-
-// How many datagrams a frame of `payload_bytes` needs.
-pub const MAX_PAYLOAD: usize = 1200;
-pub fn packet_count(payload_bytes: usize) -> u16 {
-    payload_bytes.div_ceil(MAX_PAYLOAD) as u16
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("error: {err:#}");
+        std::process::exit(1);
+    }
 }
 
 fn run() -> Result<()> {
@@ -70,44 +77,28 @@ fn run() -> Result<()> {
         None => 0,
     };
 
-// Frame header for video datagrams, exactly 24 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
-pub struct FrameHeader {
-    /// flags: bit0 keyframe, bit1 keyframe request
-    pub flags: u8,
-    /// frame_id monotonically increasing per session
-    pub frame_id: u32,
-    /// packet_index within the frame
-    pub packet_index: u16,
-    /// packet_count total packets per frame
-    pub packet_count: u16,
-    /// timestamp_us since epoch or stream start
-    pub timestamp_us: u64,
-    /// payload_len length of payload data following the header
-    pub payload_len: u16,
-}
+    // Runtime diagnostics: show exactly which ports the processes are using.
+    println!("client_ports: bind={bind} server={server}");
+    println!("client size: {width}x{height}");
 
-impl FrameHeader {
-    /// Fixed size of a frame header in bytes (24).
-    pub const SIZE: usize = 24;
+    let sdl = sdl2::init().map_err(|err| anyhow!("SDL init failed: {err}"))?;
+    let video = sdl
+        .video()
+        .map_err(|err| anyhow!("SDL video init failed: {err}"))?;
 
-    /// Decode a FrameHeader from the first 24 bytes of a datagram.
-    pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < Self::SIZE {
-            return None;
+    // Default to a window that fits on the screen: the stream may well be
+    // 1280x720 on a 1366x768 laptop panel. SDL scales the texture for free.
+    let (window_width, window_height) = match requested_window {
+        Some(size) => size,
+        None => {
+            let desktop = video
+                .desktop_display_mode(0)
+                .map_err(|err| anyhow!("reading the desktop mode failed: {err}"))?;
+            let max_width = (desktop.w.max(0) as u32) * 9 / 10;
+            let max_height = (desktop.h.max(0) as u32) * 9 / 10;
+            (width.min(max_width), height.min(max_height))
         }
-        Some(Self {
-            flags: data[5],
-            frame_id: u32::from_be_bytes([data[6], data[7], data[8], data[9]]),
-            packet_index: u16::from_be_bytes([data[10], data[11]]),
-            packet_count: u16::from_be_bytes([data[12], data[13]]),
-            timestamp_us: u64::from_be_bytes([
-                data[14], data[15], data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
-            ]),
-            payload_len: u16::from_be_bytes([data[22], data[23]]),
-        })
-    }
+    };
 
     println!(
         "client: video on {bind}, keyframe requests to {server}, stream {width}x{height}, window {window_width}x{window_height}{}{}{}",
@@ -117,344 +108,69 @@ impl FrameHeader {
     );
     println!("client size: {width}x{height}");
 
-    /// Returns whether the keyframe flag is set.
-    pub fn is_keyframe(self) -> bool {
-        self.flags & FLAG_KEYFRAME != 0
+    let stats = Arc::new(Stats::default());
+    let running = Arc::new(AtomicBool::new(true));
+
+    let (config_tx, config_rx) = std::sync::mpsc::sync_channel::<(u32, u32, u16, u8)>(4);
+    let (decoder, sink) = Decoder::new(width, height)?;
+    let receiver = Receiver::new(bind, server, width, height, config_tx, stats.clone(), running.clone())?;
+    // The sender must be created before spawn() consumes the receiver.
+    let mut input = receiver.input_sender()?;
+    let net_thread = receiver.spawn(decoder);
+
+    if let Some(orient) = orientation_arg {
+        let _ = input.set_orientation(orient);
     }
 
-    /// Returns whether the keyframe request flag is set.
-    pub fn is_keyframe_request(self) -> bool {
-        self.flags & FLAG_KEYFRAME_REQUEST != 0
+    let mut builder = video.window("lowlat-screen", window_width, window_height);
+    builder.resizable();
+    if fullscreen {
+        builder.fullscreen_desktop();
     }
-}
+    let window = builder
+        .build()
+        .map_err(|err| anyhow!("creating the window failed: {err}"))?;
 
-pub const HEADER_LEN: usize = 24;
-pub const MAGIC: u32 = 0x4C4C5332;
-pub const VERSION: u8 = 1;
+    // Keep the cursor visible so the user can interact smoothly across screens.
+    sdl.mouse().show_cursor(true);
+    let mut canvas = window
+        .into_canvas()
+        .build()
+        .map_err(|err| anyhow!("creating the canvas failed: {err}"))?;
+    let texture_creator = canvas.texture_creator();
+    // Use IYUV planar format: Y plane, then U, then V. No BGRA conversion.
+    // SDL_PIXELFORMAT_IYUV layout: [Y_0...Y_{n-1} U_0...U_{n/2-1} V_0...V_{n/2-1}]
+    // with pitch: Y = width, U = width/2, V = width/2
+    let mut texture = texture_creator
+        .create_texture_streaming(PixelFormatEnum::IYUV, width, height)
+        .map_err(|err| anyhow!("creating the video texture failed: {err}"))?;
+    let mut event_pump = sdl
+        .event_pump()
+        .map_err(|err| anyhow!("getting the SDL event pump failed: {err}"))?;
 
-// Default network ports
-pub const DEFAULT_CLIENT_PORT: u16 = 9100;
-pub const DEFAULT_SERVER_PORT: u16 = 9000;
+    let mut pitch = width as usize; // IYUV: Y plane pitch = width (bytes per row)
+    let started = Instant::now();
+    let limit = (seconds > 0).then(|| Duration::from_secs(seconds));
+    let mut last_report = Instant::now();
+    let mut frames_rendered = 0u64;
+    let mut decode_total_ms: f32 = 0.0;
+    let mut render_total_ms: f32 = 0.0;
+    let mut last_frame_at = Instant::now();
 
-// Maximum packets per frame for partial frame accumulation.
-pub const MAX_PACKETS_PER_FRAME: u16 = 32;
-// Maximum number of partial frames to keep before evicting oldest.
-pub const MAX_PARTIAL_FRAMES: usize = 8;
-// Keyframe request interval in milliseconds.
-pub const REQUEST_INTERVAL: u64 = 1000;
+    // Input forwarding state.
+    let mut input_events_sent: u64 = 0;
+    let mut btn_mask: u8 = 0;
+    let mut pending_move: Option<(i32, i32)> = None;
+    let mut last_mouse_send = Instant::now();
 
-// Keyframe flag bit (bit0 of flags field)
-pub const FLAG_KEYFRAME: u8 = 0x01;
-// Keyframe request flag bit (bit1 of flags field)
-pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
-
-// Input forwarding message types, sent over the existing UDP control channel
-// (server port 9000). The first byte is the message type; the rest is type-
-// specific payload. All input datagrams use the same 24-byte frame header as
-// video frames, with the magic `0x4C4C5332` and version `1`, but the payload
-// data after the header carries the input message.
-
-// Layout of the *payload* (after the 24-byte video header):
-
-// ```text
-//  0       msg_type       u8   see InputMsg below
-//  1..3    reserved       u8[2]  (zero-filled for future use)
-//  3..5    seq_id         u16  monotonically increasing per-session
-//  5..13   session_token  u64   identifies the streaming session
-// 13..    payload       varies by msg_type
-// ```
-
-// ```text
-//  0       msg_type       u8   0x01 = MouseMove
-//                               0x02 = MouseBtn
-//                               0x03 = MouseWheel
-//                               0x04 = Key
-//                               0x05 = ReleaseAll
-//  1..3    reserved       u8[2]
-//  3..5    seq_id         u16
-//  5..13   session_token  u64
-// 13..15  mouse_x        u16  normalized x (0..65535) â€” MouseMove only
-// 15..17  mouse_y        u16  normalized y (0..65535) â€” MouseMove only
-// 13      button_mask      u8   bits 0=left, 1=right, 2=middle â€” MouseBtn only
-// 13..15  wheel_delta    i16  positive = up/away, negative = down/toward â€” MouseWheel only
-// 13      scode            u8   SDL scancode; bit 7 = key up â€” Key only
-// ```
-
-// ```rust
-// use common::{InputMsg, input_msg_encode, input_msg_decode};
-
-// let mut buf = [0u8; 38]; // 24-byte header + 14-byte payload
-// input_msg_encode(InputMsg::MouseMove, 42, 0x123456789abcdef0, &mut buf[24..]);
-// ```
-
-// Redistribution of this source is permitted under the MIT license that
-// governs the rest of this project.
-
-// How many datagrams a frame of `payload_bytes` needs.
-pub const MAX_PAYLOAD: usize = 1200;
-pub fn packet_count(payload_bytes: usize) -> u16 {
-    payload_bytes.div_ceil(MAX_PAYLOAD) as u16
-}
-
-// Default network ports
-pub const DEFAULT_CLIENT_PORT: u16 = 9100;
-pub const DEFAULT_SERVER_PORT: u16 = 9000;
-
-// Maximum packets per frame for partial frame accumulation.
-pub const MAX_PACKETS_PER_FRAME: u16 = 32;
-// Maximum number of partial frames to keep before evicting oldest.
-pub const MAX_PARTIAL_FRAMES: usize = 8;
-// Keyframe request interval in milliseconds.
-pub const REQUEST_INTERVAL: u64 = 1000;
-
-// Keyframe flag bit (bit0 of flags field)
-pub const FLAG_KEYFRAME: u8 = 0x01;
-// Keyframe request flag bit (bit1 of flags field)
-pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
-
-// Input forwarding message types, sent over the existing UDP control channel
-// (server port 9000). The first byte is the message type; the rest is type-.
-// specific payload. All input datagrams use the same 24-byte frame header as
-// video frames, with the magic `0x4C4C5332` and version `1`, but the payload
-// data after the header carries the input message.
-
-// Layout of the *payload* (after the 24-byte video header):
-
-// ```text
-//  0       msg_type       u8   see InputMsg below
-//  1..3    reserved       u8[2]  (zero-filled for future use)
-//  3..5    seq_id         u16  monotonically increasing per-session
-//  5..13   session_token  u64   identifies the streaming session
-// 13..    payload       varies by msg_type
-// ```
-
-// ```text
-//  0       msg_type       u8   0x01 = MouseMove
-//                               0x02 = MouseBtn
-//                               0x03 = MouseWheel
-//                               0x04 = Key
-//                               0x05 = ReleaseAll
-//  1..3    reserved       u8[2]
-//  3..5    seq_id         u16
-//  5..13   session_token  u64
-// 13..15  mouse_x        u16  normalized x (0..65535) â€” MouseMove only
-// 15..17  mouse_y        u16  normalized y (0..65535) â€” MouseMove only
-// 13      button_mask      u8   bits 0=left, 1=right, 2=middle â€” MouseBtn only
-// 13..15  wheel_delta    i16  positive = up/away, negative = down/toward â€” MouseWheel only
-// 13      scode            u8   SDL scancode; bit 7 = key up â€” Key only
-// ```
-
-// ```rust
-// use common::{InputMsg, input_msg_encode, input_msg_decode};
-
-// let mut buf = [0u8; 38]; // 24-byte header + 14-byte payload
-// input_msg_encode(InputMsg::MouseMove, 42, 0x123456789abcdef0, &mut buf[24..]);
-// ```
-
-// ```text
-// // How many datagrams a frame of `payload_bytes` needs.
-// pub const MAX_PAYLOAD: usize = 1200;
-// pub fn packet_count(payload_bytes: usize) -> u16 {
-//     payload_bytes.div_ceil(MAX_PAYLOAD) as u16
-// }
-
-// ```text
-// // Default network ports
-// pub const DEFAULT_CLIENT_PORT: u16 = 9100;
-// pub const DEFAULT_SERVER_PORT: u16 = 9000;
-
-// ```text
-// // Maximum packets per frame for partial frame accumulation.
-// pub const MAX_PACKETS_PER_FRAME: u16 = 32;
-
-// ```text
-// // Maximum number of partial frames to keep before evicting oldest.
-// pub const MAX_PARTIAL_FRAMES: usize = 8;
-
-// ```text
-// // Keyframe request interval in milliseconds.
-// pub const REQUEST_INTERVAL: u64 = 1000;
-
-// ```rust
-// ``` // Keyframe flag bit (bit0 of flags field)
-// pub const FLAG_KEYFRAME: u8 = 0x01;
-// // Keyframe request flag bit (bit1 of flags field)
-// pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
-
-// Input forwarding message types, sent over the existing UDP control channel
-// (server port 9000). The first byte is the message type; the rest is type-.
-// specific payload. All input datagrams use the same 24-byte frame header as
-// video frames, with the magic `0x4C4C5332` and version `1`, but the payload
-// data after the header carries the input message.
-
-// Layout of the *payload* (after the 24-byte video header):
-
-// ```text
-//  0       msg_type       u8   see InputMsg below
-//  1..3    reserved       u8[2]  (zero-filled for future use)
-//  3..5    seq_id         u16  monotonically increasing per-session
-//  5..13   session_token  u64   identifies the streaming session
-// 13..    payload       varies by msg_type
-// ```
-
-// ```text
-//  0       msg_type       u8   0x01 = MouseMove
-//                               0x02 = MouseBtn
-//                               0x03 = MouseWheel
-//                               0x04 = Key
-//                               0x05 = ReleaseAll
-//  1..3    reserved       u8[2]
-//  3..5    seq_id         u16
-//  5..13   session_token  u64
-// 13..15  mouse_x        u16  normalized x (0..65535) â€” MouseMove only
-// 15..17  mouse_y        u16  normalized y (0..65535) â€” MouseMove only
-// 13      button_mask      u8   bits 0=left, 1=right, 2=middle â€” MouseBtn only
-// 13..15  wheel_delta    i16  positive = up/away, negative = down/toward â€” MouseWheel only
-// 13      scode            u8   SDL scancode; bit 7 = key up â€” Key only
-// ```
-
-// ```rust
-// use common::{InputMsg, input_msg_encode, input_msg_decode};
-
-// let mut buf = [0u8; 38]; // 24-byte header + 14-byte payload
-// input_msg_encode(InputMsg::MouseMove, 42, 0x123456789abcdef0, &mut buf[24..]);
-// ```
-
-// ```text
-// // Coalesce mouse moves: send at most one position every this many ms.
-// const MOUSE_MOVE_INTERVAL_MS: u64 = 8;
-
-// fn main() {
-//     if let Err(err) = run() {
-//         eprintln!("error: {err:#}");
-//         std::process::exit(1);
-//     }
-// }
-
-// fn run() -> Result<()> {
-//     let args: Vec<String> = std::env::args().skip(1).collect();
-//     let bind: SocketAddr = value(&args, "--bind")
-//         .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_CLIENT_PORT}"))
-//         .parse()
-//         .context("--bind must look like 0.0.0.0:9100")?;
-//     let server: SocketAddr = value(&args, "--server")
-//         .unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_SERVER_PORT}"))
-//         .parse()
-//         .context("--server must look like 127.0.0.1:9000")?;
-//     let (mut width, mut height) =
-//         parse_size(&value(&args, "--size").unwrap_or_else(|| "1280x720".to_string()))?;
-//     let requested_window = value(&args, "--window").map(|text| parse_size(&text)).transpose()?;
-//     // Default to fullscreen for extended display unless a specific window size is requested.
-//     let mut fullscreen = args.iter().any(|arg| arg == "--fullscreen") || requested_window.is_none();
-//     let flip = args.iter().any(|arg| arg == "--flip");
-//     let orientation_arg: Option<u16> = value(&args, "--orientation")
-//         .map(|s| s.parse().context("--orientation must be 0, 90, 180, or 270"))
-//         .transpose()?;
-//     let mut current_orientation: u16 = orientation_arg.unwrap_or(0);
-//     let mut orient: u16 = current_orientation;
-//     let seconds: u64 = match value(&args, "--seconds") {
-//         Some(text) => text.parse().context("--seconds must be a number")?,
-//         None => 0,
-//     };
-
-//     // Runtime diagnostics: show exactly which ports the processes are using.
-//     println!("client_ports: bind={bind} server={server}");
-//     println!("client size: {width}x{height}");
-
-//     let sdl = sdl2::init().map_err(|err| anyhow!("SDL init failed: {err}"))?;
-//     let video = sdl
-//         .video()
-//         .map_err(|err| anyhow!("SDL video init failed: {err}"))?;
-
-//     // Default to a window that fits on the screen: the stream may well be
-//     // 1280x720 on a 1366x768 laptop panel. SDL scales the texture for free.
-//     let (window_width, window_height) = match requested_window {
-//         Some(size) => size,
-//         None => {
-//             let desktop = video
-//                 .desktop_display_mode(0)
-//                 .map_err(|err| anyhow!("reading the desktop mode failed: {err}"))?;
-//             let max_width = (desktop.w.max(0) as u32) * 9 / 10;
-//             let max_height = (desktop.h.max(0) as u32) * 9 / 10;
-//             (width.min(max_width), height.min(max_height))
-//         }
-//     };
-
-//     println!(
-//         "client: video on {bind}, keyframe requests to {server}, stream {width}x{height}, window {window_width}x{window_height}{}{}",
-//         if fullscreen { " (fullscreen)" } else { "" },
-//         if flip { " (flip 180°)" } else { "" }
-//     );
-//     println!("client size: {width}x{height}");
-
-//     let stats = Arc::new(Stats::default());
-//     let running = Arc::new(AtomicBool::new(true));
-
-//     let (config_tx, config_rx) = std::sync::mpsc::sync_channel::<(u32, u32, u16, u8)>(4);
-//     let (decoder, sink) = Decoder::new(width, height)?;
-//     let receiver = Receiver::new(bind, server, width, height, config_tx, stats.clone(), running.clone())?
-//         // The sender must be created before spawn() consumes the receiver.
-//     let mut input = receiver.input_sender()?;
-//     let net_thread = receiver.spawn(decoder);
-
-//     if let Some(orient) = orientation_arg {
-//         let _ = input.set_orientation(orient);
-//     }
-
-//     let mut builder = video.window("lowlat-screen", window_width, window_height);
-//     builder.resizable();
-//     if fullscreen {
-//         builder.fullscreen_desktop();
-//     }
-//     let window = builder
-//         .build()
-//         .map_err(|err| anyhow!("creating the window failed: {err}"))?;
-
-//     // Keep the cursor visible so the user can interact smoothly across screens.
-//     sdl.mouse().show_cursor(true);
-//     let mut canvas = window
-//         .into_canvas()
-//         .build()
-//         .map_err(|err| anyhow!("creating the canvas failed: {err}"))?;
-//     let texture_creator = canvas.texture_creator();
-//     // Use IYUV planar format: Y plane, then U, then V. No BGRA conversion.
-//     // SDL_PIXELFORMAT_IYUV layout: [Y_0...Y_{n-1} U_0...U_{n/2-1} V_0...V_{n/2-1}]
-//     // with pitch: Y = width, U = width/2, V = width/2
-//     let mut texture = texture_creator
-//         .create_texture_streaming(PixelFormatEnum::IYUV, width, height)
-//         .map_err(|err| anyhow!("creating the video texture failed: {err}"))?;
-//     let mut event_pump = sdl
-//         .event_pump()
-//         .map_err(|err| anyhow!("getting the SDL event pump failed: {err}"))?;
-
-//     let mut pitch = width as usize; // IYUV: Y plane pitch = width (bytes per row)
-//     let started = Instant::now();
-//     let limit = (seconds > 0).then(|| Duration::from_secs(seconds));
-//     let mut last_report = Instant::now();
-//     let mut frames_rendered = 0u64;
-//     let mut decode_total_ms: f32 = 0.0;
-//     let mut render_total_ms: f32 = 0.0;
-//     let mut last_frame_at = Instant::now();
-
-//     // Input forwarding state.
-//     let mut input_events_sent: u64 = 0;
-//     let mut btn_mask: u8 = 0;
-//     let mut pending_move: Option<(i32, i32)> = None;
-//     let mut last_mouse_send = Instant::now();
-
-//     'outer: loop {
-//         for event in event_pump.poll_iter() {
-//             match event {
-//                 Event::Quit { .. } => break 'outer,
-//                 Event::KeyDown {
-//                     keycode: Some(Keycode::Escape),
-//                     ..
-//                 } => break 'outer,
-//                 Event::KeyDown {
-//                     keycode: Some(Keycode::F11),
-//                     repeat: false,
-//                     ..
-                    
+    'outer: loop {
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit { .. } => break 'outer,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'outer,
                 Event::KeyDown {
                     keycode: Some(Keycode::F11),
                     repeat: false,
@@ -559,8 +275,8 @@ pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
             }
         }
 
-// Flush the coalesced mouse position, normalized to the current
-// window size (which changes on resize and fullscreen toggles).
+        // Flush the coalesced mouse position, normalized to the current
+        // window size (which changes on resize and fullscreen toggles).
         if let Some((x, y)) = pending_move {
             if last_mouse_send.elapsed() >= Duration::from_millis(MOUSE_MOVE_INTERVAL_MS) {
                 pending_move = None;
@@ -589,7 +305,7 @@ pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
             }
         }
 
-// Check for server display configuration updates
+        // Check for server display configuration updates
         // Always apply the new config: width/height/orientation.
         // Recreate the texture whenever the config changes (size or rotation),
         // so portrait/landscape flips are visible immediately.  The --size
@@ -619,7 +335,7 @@ pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
             }
         }
 
-// Always render the newest frame; anything older is already gone.
+        // Always render the newest frame; anything older is already gone.
         match sink.take_latest() {
             Some(frame) => {
                 let expected_len = pitch * height as usize * 3 / 2;
@@ -705,9 +421,9 @@ pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
         }
     }
 
-// On clean exit, release all keys and mouse buttons on the server.
+    // On clean exit, release all keys and mouse buttons on the server.
     let _ = input.release_all();
-// Restore the local cursor on exit.
+    // Restore the local cursor on exit.
     sdl.mouse().show_cursor(true);
 
     running.store(false, Ordering::Relaxed);
@@ -716,7 +432,7 @@ pub const FLAG_KEYFRAME_REQUEST: u8 = 0x02;
     Ok(())
 }
 
-// Count a successful send; log failures without killing the render loop.
+/// Count a successful send; log failures without killing the render loop.
 fn count_send(result: Result<()>, counter: &mut u64, what: &str) {
     match result {
         Ok(()) => *counter += 1,
@@ -733,7 +449,7 @@ fn button_bit(btn: MouseButton) -> u8 {
     }
 }
 
-// Window pixel coordinate -> normalized 0..65535.
+/// Window pixel coordinate -> normalized 0..65535.
 fn normalize_coord(value: i32, extent: u32) -> u16 {
     let extent = extent.max(1) as f64;
     let normalized = (value.max(0) as f64 / extent) * 65535.0;
@@ -788,68 +504,4 @@ fn parse_size(text: &str) -> Result<(u32, u32)> {
         width.trim().parse().context("invalid width in --size")?,
         height.trim().parse().context("invalid height in --size")?,
     ))
-)
-}
-
-fn parse_size(text: &str) -> Result<(u32, u32)> {
-    let (width, height) = text
-        .split_once('x')
-        .with_context(|| format!("size must look like 1280x720, got {text:?}"))?;
-    Ok((
-        width.trim().parse().context("invalid width in --size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-}size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-})
-})
-)
-}
-
-fn parse_size(text: &str) -> Result<(u32, u32)> {
-    let (width, height) = text
-        .split_once('x')
-        .with_context(|| format!("size must look like 1280x720, got {text:?}"))?;
-    Ok((
-        width.trim().parse().context("invalid width in --size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-}size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-})
-})
-)
-}
-
-fn parse_size(text: &str) -> Result<(u32, u32)> {
-    let (width, height) = text
-        .split_once('x')
-        .with_context(|| format!("size must look like 1280x720, got {text:?}"))?;
-    Ok((
-        width.trim().parse().context("invalid width in --size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-}size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-})
-})
-)
-}
-
-fn parse_size(text: &str) -> Result<(u32, u32)> {
-    let (width, height) = text
-        .split_once('x')
-        .with_context(|| format!("size must look like 1280x720, got {text:?}"))?;
-    Ok((
-        width.trim().parse().context("invalid width in --size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-}size")?,
-        height.trim().parse().context("invalid height in --size")?,
-    ))
-})
-})
 }
