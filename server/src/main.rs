@@ -347,8 +347,8 @@ fn run() -> Result<()> {
             println!("orientation changed to {new_orient}°, target size {encode_width}x{encode_height}");
             let _ = capture.force_recreate();
             need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
-            encoder.finish()?;
-            encoder = Encoder::new(
+            let _ = encoder.finish();
+            if let Ok(enc) = Encoder::new(
                 capture.width(),
                 capture.height(),
                 capture.pixel_format(),
@@ -359,7 +359,9 @@ fn run() -> Result<()> {
                 &encode_path,
                 need_scale,
                 orientation.into(),
-            )?;
+            ) {
+                encoder = enc;
+            }
             println!("capture size: {}x{}", capture.width(), capture.height());
             println!("encoder size: {}x{}", encode_width, encode_height);
             let new_rect = input::MonitorRect {
@@ -376,8 +378,8 @@ fn run() -> Result<()> {
         // process serves keyframe requests. It costs ~100-300 ms of stream.
         if force_keyframe.swap(false, Ordering::Relaxed) {
             restarts += 1;
-            encoder.finish()?;
-            encoder = Encoder::new(
+            let _ = encoder.finish();
+            if let Ok(enc) = Encoder::new(
                 capture.width(),
                 capture.height(),
                 capture.pixel_format(),
@@ -388,7 +390,9 @@ fn run() -> Result<()> {
                 &encode_path,
                 need_scale,
                 orientation.into(),
-            )?;
+            ) {
+                encoder = enc;
+            }
             println!("restarted encoder for keyframe request #{restarts}");
             // Do not try to make up the time the restart consumed.
             next_deadline = Instant::now() + Duration::from_secs_f64(1.0 / fps as f64);
@@ -404,7 +408,13 @@ fn run() -> Result<()> {
 
         let frame_started = Instant::now();
         let timeout = next_deadline.saturating_duration_since(frame_started);
-        let acquired = capture.acquire(timeout.as_millis().max(1) as u32)?;
+        let acquired = match capture.acquire(timeout.as_millis().max(1) as u32) {
+            Ok(acq) => acq,
+            Err(err) => {
+                eprintln!("capture acquire error: {err:#}; retrying");
+                continue;
+            }
+        };
 
         // A desktop mode change resizes the capture; ffmpeg was told the old
         // input size, so restart it before feeding the new-sized buffer.
@@ -425,8 +435,8 @@ fn run() -> Result<()> {
                 }
             }
             need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
-            encoder.finish()?;
-            encoder = Encoder::new(
+            let _ = encoder.finish();
+            match Encoder::new(
                 capture.width(),
                 capture.height(),
                 capture.pixel_format(),
@@ -437,7 +447,12 @@ fn run() -> Result<()> {
                 &encode_path,
                 need_scale,
                 orientation.into(),
-            )?;
+            ) {
+                Ok(enc) => encoder = enc,
+                Err(err) => {
+                    eprintln!("recreating encoder failed: {err:#}; will retry");
+                }
+            }
             println!(
                 "capture is now {}x{} (orientation {}°), restarted encoder",
                 capture.width(),
@@ -462,7 +477,9 @@ fn run() -> Result<()> {
         frame_is_new = acquired.frame_status;
 
         let encode_started = Instant::now();
-        encoder.write_frame(capture.frame())?;
+        if let Err(err) = encoder.write_frame(capture.frame()) {
+            eprintln!("writing frame to encoder failed: {err:#}");
+        }
         let this_encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
 
         copy_ms.push((acquired.copy.as_secs_f64() * 1000.0) as f32);

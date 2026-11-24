@@ -28,7 +28,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
-    IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
+    IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_NOT_FOUND,
     DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
@@ -96,7 +96,7 @@ pub struct Capture {
     context: ID3D11DeviceContext,
     /// The DXGI output (monitor) being captured.
     output: IDXGIOutput1,
-    duplication: IDXGIOutputDuplication,
+    duplication: Option<IDXGIOutputDuplication>,
     /// Staging texture, as the parent interface the D3D11 calls expect.
     staging: ID3D11Resource,
     width: u32,
@@ -267,7 +267,7 @@ impl Capture {
             device,
             context,
             output,
-            duplication,
+            duplication: Some(duplication),
             staging,
             width,
             height,
@@ -346,7 +346,18 @@ impl Capture {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
 
-        match unsafe { self.duplication.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
+        let Some(duplication) = &self.duplication else {
+            let recreated = self.recreate_duplication().unwrap_or(false);
+            return Ok(Acquired {
+                new_frame: false,
+                wait: started.elapsed(),
+                copy: Duration::ZERO,
+                brightness: self.brightness,
+                frame_status: if recreated { "lost" } else { "repeat" },
+            });
+        };
+
+        match unsafe { duplication.AcquireNextFrame(timeout_ms, &mut info, &mut resource) } {
             Ok(()) => {}
             Err(err) if err.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                 return Ok(Acquired {
@@ -357,10 +368,10 @@ impl Capture {
                     frame_status: "repeat",
                 });
             }
-            Err(err) if err.code() == DXGI_ERROR_ACCESS_LOST => {
+            Err(_err) => {
                 // Desktop changed underneath us (mode switch, lock screen,
-                // UAC). Rebuild the duplication; keep serving the last frame
-                // until it succeeds.
+                // UAC, device reset). Drop duplication and recreate.
+                self.duplication = None;
                 let recreated = self.recreate_duplication().unwrap_or(false);
                 return Ok(Acquired {
                     new_frame: false,
@@ -369,9 +380,6 @@ impl Capture {
                     brightness: self.brightness,
                     frame_status: if recreated { "lost" } else { "repeat" },
                 });
-            }
-            Err(err) => {
-                return Err(anyhow::Error::new(err)).context("AcquireNextFrame failed");
             }
         }
 
@@ -389,7 +397,9 @@ impl Capture {
 
         let force_first_copy = self.brightness == 0.0;
         if !force_first_copy && info.AccumulatedFrames == 0 && info.LastPresentTime == 0 {
-            let _ = unsafe { self.duplication.ReleaseFrame() };
+            if let Some(dup) = &self.duplication {
+                let _ = unsafe { dup.ReleaseFrame() };
+            }
 
             // If the cursor moved or changed on this output while desktop is static,
             // re-composite onto the clean desktop buffer and emit a frame.
@@ -441,9 +451,9 @@ impl Capture {
                 self.context
                     .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped as *mut _))
             {
-                // The frame stays acquired until ReleaseFrame, so release it
-                // before bailing out or every later AcquireNextFrame fails.
-                let _ = self.duplication.ReleaseFrame();
+                if let Some(dup) = &self.duplication {
+                    let _ = dup.ReleaseFrame();
+                }
                 return Err(anyhow::Error::new(err)).context("mapping the staging texture failed");
             }
 
@@ -460,9 +470,9 @@ impl Capture {
             }
 
             self.context.Unmap(&self.staging, 0);
-            self.duplication
-                .ReleaseFrame()
-                .context("ReleaseFrame failed")?;
+            if let Some(dup) = &self.duplication {
+                let _ = dup.ReleaseFrame();
+            }
         }
 
         self.buffer.copy_from_slice(&self.clean_buffer);
@@ -478,10 +488,12 @@ impl Capture {
         })
     }
 
-    /// Re-create the duplication after ACCESS_LOST. Returns `false` (without
-    /// failing) when the desktop is still unavailable, so the caller keeps
-    /// retrying on later ticks.
+    /// Re-create the duplication after ACCESS_LOST or display mode change.
+    /// Returns `false` (without failing) when the desktop is still unavailable,
+    /// so the caller keeps retrying on later ticks.
     fn recreate_duplication(&mut self) -> Result<bool> {
+        self.duplication = None;
+
         unsafe {
             if let Ok(hdesk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0x1FF)) {
                 let _ = SetThreadDesktop(hdesk);
@@ -513,14 +525,13 @@ impl Capture {
         self.device = device;
         self.context = context;
         self.output = output;
-        self.duplication = duplication;
 
         if let Ok(out_desc) = unsafe { self.output.GetDesc() } {
             self.x = out_desc.DesktopCoordinates.left;
             self.y = out_desc.DesktopCoordinates.top;
         }
 
-        let desc = unsafe { self.duplication.GetDesc() };
+        let desc = unsafe { duplication.GetDesc() };
         let (mut width, mut height, format) = (desc.ModeDesc.Width, desc.ModeDesc.Height, desc.ModeDesc.Format);
         let rot = desc.Rotation.0 as u32;
 
@@ -532,16 +543,23 @@ impl Capture {
             return Ok(false);
         }
 
-        if width != self.width || height != self.height || format != self.format || rot != self.rotation {
-            self.pixel_format = pixel_format_name(format)?;
-            self.staging = create_staging_texture(&self.device, width, height, format)?;
-            self.width = width;
-            self.height = height;
-            self.rotation = rot;
-            self.buffer = vec![0u8; width as usize * height as usize * 4];
-            self.clean_buffer = vec![0u8; width as usize * height as usize * 4];
-            self.cursor.shape.clear();
-            self.brightness = 0.0;
+        self.pixel_format = pixel_format_name(format)?;
+        self.staging = create_staging_texture(&self.device, width, height, format)?;
+
+        let rotation_changed = rot != self.rotation;
+        let size_changed = width != self.width || height != self.height || format != self.format;
+
+        self.width = width;
+        self.height = height;
+        self.rotation = rot;
+        self.format = format;
+        self.buffer = vec![0u8; width as usize * height as usize * 4];
+        self.clean_buffer = vec![0u8; width as usize * height as usize * 4];
+        self.cursor.shape.clear();
+        self.brightness = 0.0;
+        self.duplication = Some(duplication);
+
+        if size_changed || rotation_changed {
             self.size_changed = true;
             eprintln!("capture resized to {width}x{height} (rotation {rot}), rebuilding the encoder");
         }
@@ -551,11 +569,14 @@ impl Capture {
 
     /// Fetch the cursor shape from DXGI into `self.cursor.shape` (BGRA).
     fn fetch_cursor_shape(&mut self, buf_size: u32) {
+        let Some(duplication) = &self.duplication else {
+            return;
+        };
         let mut raw: Vec<u8> = vec![0u8; buf_size as usize];
         let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
         let mut required = 0u32;
         let result = unsafe {
-            self.duplication.GetFramePointerShape(
+            duplication.GetFramePointerShape(
                 buf_size,
                 raw.as_mut_ptr() as *mut _,
                 &mut required,

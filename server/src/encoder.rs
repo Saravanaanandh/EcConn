@@ -26,7 +26,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::SyncSender;
 use std::thread::JoinHandle;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 /// One encoded frame: a complete Annex B access unit.
 pub struct EncodedFrame {
@@ -181,14 +181,11 @@ impl Encoder {
     /// starts with SPS/PPS + IDR, which is how we serve keyframe requests).
     pub fn finish(&mut self) -> Result<()> {
         let _ = self.stdin.take();
-        let status = self.child.wait()?;
+        let _ = self.child.wait();
         // ffmpeg is gone, so the reader sees EOF and exits; join it so no
         // thread outlives the encoder (important on keyframe restarts).
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
-        }
-        if !status.success() {
-            bail!("ffmpeg exited with {status}");
         }
         Ok(())
     }
