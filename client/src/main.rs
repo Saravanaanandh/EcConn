@@ -65,6 +65,7 @@ fn run() -> Result<()> {
         .map(|s| s.parse().context("--orientation must be 0, 90, 180, or 270"))
         .transpose()?;
     let mut current_orientation: u16 = orientation_arg.unwrap_or(0);
+    let mut orient: u16 = current_orientation;
     let seconds: u64 = match value(&args, "--seconds") {
         Some(text) => text.parse().context("--seconds must be a number")?,
         None => 0,
@@ -272,9 +273,13 @@ fn run() -> Result<()> {
         }
 
         // Check for server display configuration updates
+        // Always apply the new config: width/height/orientation.
+        // Recreate the texture whenever the config changes (size or rotation),
+        // so portrait/landscape flips are visible immediately.  The --size
+        // argument is only used until the first config arrives.
         while let Ok((new_w, new_h, new_orient, _new_rot)) = config_rx.try_recv() {
             current_orientation = new_orient;
-            if new_w != width || new_h != height {
+            if new_w != width || new_h != height || orient != new_orient {
                 println!(
                     "client size: {new_w}x{new_h} (orientation {new_orient}°)"
                 );
@@ -287,6 +292,7 @@ fn run() -> Result<()> {
                 if !fullscreen {
                     let _ = canvas.window_mut().set_size(width, height);
                 }
+                orient = new_orient;
             }
         }
 
