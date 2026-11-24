@@ -30,6 +30,8 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
     DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::StationsAndDesktops::{
@@ -68,6 +70,26 @@ pub struct MonitorInfo {
     pub top: i32,
 }
 
+/// Cursor overlay state: last known shape (BGRA pixels) and position on the
+/// captured output. Updated each frame from `DXGI_OUTDUPL_FRAME_INFO`.
+#[derive(Default)]
+struct CursorState {
+    /// BGRA pixel data of the cursor.
+    shape: Vec<u8>,
+    /// Width of the cursor image in pixels.
+    shape_width: i32,
+    /// Height of the cursor image in pixels.
+    shape_height: i32,
+    /// Hot-spot offset within the cursor image (pixels).
+    hot_x: i32,
+    hot_y: i32,
+    /// Cursor position relative to this output's upper-left corner.
+    pos_x: i32,
+    pos_y: i32,
+    /// Whether the cursor is currently visible on this output.
+    visible: bool,
+}
+
 /// Captures raw video frames from a DXGI output using Desktop Duplication.
 pub struct Capture {
     device: ID3D11Device,
@@ -88,12 +110,14 @@ pub struct Capture {
     format: DXGI_FORMAT,
     pixel_format: &'static str,
     buffer: Vec<u8>,
+    clean_buffer: Vec<u8>,
     /// Average brightness of the last copied frame, reported again on
     /// repeat ticks so the stats line never falls back to 0.
     brightness: f32,
     /// Set when a desktop mode change resized the capture, so the caller can
     /// rebuild the encoder for the new input size.
     size_changed: bool,
+    cursor: CursorState,
 }
 
 impl Capture {
@@ -205,12 +229,20 @@ impl Capture {
         )?;
 
         let desc = unsafe { duplication.GetDesc() };
-        let width = desc.ModeDesc.Width;
-        let height = desc.ModeDesc.Height;
+        let mut width = desc.ModeDesc.Width;
+        let mut height = desc.ModeDesc.Height;
         let format = desc.ModeDesc.Format;
 
         if width == 0 || height == 0 {
             bail!("duplication reported an empty mode ({}x{})", width, height);
+        }
+
+        // DXGI output duplication surfaces are in the un-rotated native orientation.
+        // If mode description reports portrait (width < height) while rotated 90° or 270°,
+        // the underlying texture is un-rotated (width and height swapped).
+        let rotation = desc.Rotation.0 as u32;
+        if (rotation == 2 || rotation == 4) && width < height {
+            std::mem::swap(&mut width, &mut height);
         }
 
         let pixel_format = pixel_format_name(format)?;
@@ -229,6 +261,7 @@ impl Capture {
         let staging = create_staging_texture(&device, width, height, format)?;
 
         let buffer = vec![0u8; width as usize * height as usize * 4];
+        let clean_buffer = vec![0u8; width as usize * height as usize * 4];
 
         Ok(Self {
             device,
@@ -246,8 +279,10 @@ impl Capture {
             format,
             pixel_format,
             buffer,
+            clean_buffer,
             brightness: 0.0,
             size_changed: false,
+            cursor: CursorState::default(),
         })
     }
 
@@ -342,9 +377,35 @@ impl Capture {
 
         let wait = started.elapsed();
 
+        // --- Cursor updates from DXGI frame info ---
+        if info.LastMouseUpdateTime != 0 {
+            self.cursor.visible = info.PointerPosition.Visible.as_bool();
+            self.cursor.pos_x = info.PointerPosition.Position.x;
+            self.cursor.pos_y = info.PointerPosition.Position.y;
+        }
+        if info.PointerShapeBufferSize > 0 {
+            self.fetch_cursor_shape(info.PointerShapeBufferSize);
+        }
+
         let force_first_copy = self.brightness == 0.0;
         if !force_first_copy && info.AccumulatedFrames == 0 && info.LastPresentTime == 0 {
             let _ = unsafe { self.duplication.ReleaseFrame() };
+
+            // If the cursor moved or changed on this output while desktop is static,
+            // re-composite onto the clean desktop buffer and emit a frame.
+            if info.LastMouseUpdateTime != 0 {
+                self.buffer.copy_from_slice(&self.clean_buffer);
+                self.overlay_cursor();
+                self.brightness = average_brightness(&self.buffer);
+                return Ok(Acquired {
+                    new_frame: true,
+                    wait,
+                    copy: Duration::ZERO,
+                    brightness: self.brightness,
+                    frame_status: "cursor",
+                });
+            }
+
             return Ok(Acquired {
                 new_frame: false,
                 wait,
@@ -360,6 +421,16 @@ impl Capture {
         let texture: ID3D11Texture2D = resource
             .cast()
             .context("IDXGIResource -> ID3D11Texture2D cast failed")?;
+        let mut td = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut td) };
+        if td.Width != self.width || td.Height != self.height {
+            self.staging = create_staging_texture(&self.device, td.Width, td.Height, self.format)?;
+            self.width = td.Width;
+            self.height = td.Height;
+            self.buffer = vec![0u8; td.Width as usize * td.Height as usize * 4];
+            self.clean_buffer = vec![0u8; td.Width as usize * td.Height as usize * 4];
+            self.size_changed = true;
+        }
         let texture: ID3D11Resource = texture.cast()?;
 
         unsafe {
@@ -376,10 +447,10 @@ impl Capture {
                 return Err(anyhow::Error::new(err)).context("mapping the staging texture failed");
             }
 
-            // The staging texture is padded to RowPitch; the buffer is not.
+            // The staging texture is padded to RowPitch; clean_buffer is not.
             let row_bytes = self.width as usize * 4;
             let src = mapped.pData as *const u8;
-            let dst = self.buffer.as_mut_ptr();
+            let dst = self.clean_buffer.as_mut_ptr();
             for y in 0..self.height as usize {
                 std::ptr::copy_nonoverlapping(
                     src.add(y * mapped.RowPitch as usize),
@@ -394,6 +465,8 @@ impl Capture {
                 .context("ReleaseFrame failed")?;
         }
 
+        self.buffer.copy_from_slice(&self.clean_buffer);
+        self.overlay_cursor();
         self.brightness = average_brightness(&self.buffer);
 
         Ok(Acquired {
@@ -442,15 +515,22 @@ impl Capture {
         self.output = output;
         self.duplication = duplication;
 
+        if let Ok(out_desc) = unsafe { self.output.GetDesc() } {
+            self.x = out_desc.DesktopCoordinates.left;
+            self.y = out_desc.DesktopCoordinates.top;
+        }
+
         let desc = unsafe { self.duplication.GetDesc() };
-        let (width, height, format) = (desc.ModeDesc.Width, desc.ModeDesc.Height, desc.ModeDesc.Format);
-        self.rotation = desc.Rotation.0 as u32;
+        let (mut width, mut height, format) = (desc.ModeDesc.Width, desc.ModeDesc.Height, desc.ModeDesc.Format);
+        let rot = desc.Rotation.0 as u32;
+
+        if (rot == 2 || rot == 4) && width < height {
+            std::mem::swap(&mut width, &mut height);
+        }
 
         if width == 0 || height == 0 {
             return Ok(false);
         }
-
-        let rot = desc.Rotation.0 as u32;
 
         if width != self.width || height != self.height || format != self.format || rot != self.rotation {
             self.pixel_format = pixel_format_name(format)?;
@@ -459,12 +539,190 @@ impl Capture {
             self.height = height;
             self.rotation = rot;
             self.buffer = vec![0u8; width as usize * height as usize * 4];
+            self.clean_buffer = vec![0u8; width as usize * height as usize * 4];
+            self.cursor.shape.clear();
             self.brightness = 0.0;
             self.size_changed = true;
             eprintln!("capture resized to {width}x{height} (rotation {rot}), rebuilding the encoder");
         }
 
         Ok(true)
+    }
+
+    /// Fetch the cursor shape from DXGI into `self.cursor.shape` (BGRA).
+    fn fetch_cursor_shape(&mut self, buf_size: u32) {
+        let mut raw: Vec<u8> = vec![0u8; buf_size as usize];
+        let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+        let mut required = 0u32;
+        let result = unsafe {
+            self.duplication.GetFramePointerShape(
+                buf_size,
+                raw.as_mut_ptr() as *mut _,
+                &mut required,
+                &mut info,
+            )
+        };
+        if result.is_err() {
+            return;
+        }
+
+        let w = info.Width as usize;
+        let h = info.Height as usize;
+        let pitch = info.Pitch as usize;
+
+        self.cursor.hot_x = info.HotSpot.x;
+        self.cursor.hot_y = info.HotSpot.y;
+
+        let shape_type = info.Type as i32;
+        if shape_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 {
+            self.cursor.shape_width = w as i32;
+            self.cursor.shape_height = h as i32;
+            let mut bgra = vec![0u8; w * h * 4];
+            for row in 0..h {
+                let src_off = row * pitch;
+                let dst_off = row * w * 4;
+                if src_off + w * 4 <= raw.len() && dst_off + w * 4 <= bgra.len() {
+                    bgra[dst_off..dst_off + w * 4]
+                        .copy_from_slice(&raw[src_off..src_off + w * 4]);
+                }
+            }
+            self.cursor.shape = bgra;
+        } else if shape_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 {
+            self.cursor.shape_width = w as i32;
+            self.cursor.shape_height = h as i32;
+            let mut bgra = vec![0u8; w * h * 4];
+            for row in 0..h {
+                let src_off = row * pitch;
+                let dst_off = row * w * 4;
+                for col in 0..w {
+                    if src_off + col * 4 + 3 < raw.len() && dst_off + col * 4 + 3 < bgra.len() {
+                        let b = raw[src_off + col * 4];
+                        let g = raw[src_off + col * 4 + 1];
+                        let r = raw[src_off + col * 4 + 2];
+                        let a = raw[src_off + col * 4 + 3];
+                        bgra[dst_off + col * 4] = b;
+                        bgra[dst_off + col * 4 + 1] = g;
+                        bgra[dst_off + col * 4 + 2] = r;
+                        bgra[dst_off + col * 4 + 3] = if a == 0 { 255 } else { a };
+                    }
+                }
+            }
+            self.cursor.shape = bgra;
+        } else if shape_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 {
+            let and_height = h;
+            let row_bytes = pitch;
+            self.cursor.shape_width = w as i32;
+            self.cursor.shape_height = and_height as i32;
+            let mut bgra = vec![0u8; w * and_height * 4];
+            for row in 0..and_height {
+                let and_off = row * row_bytes;
+                let xor_off = (row + and_height) * row_bytes;
+                for col in 0..w {
+                    let byte_idx = col / 8;
+                    let bit = 7 - (col % 8);
+                    if and_off + byte_idx < raw.len() && xor_off + byte_idx < raw.len() {
+                        let and_bit = (raw[and_off + byte_idx] >> bit) & 1;
+                        let xor_bit = (raw[xor_off + byte_idx] >> bit) & 1;
+                        let dst = (row * w + col) * 4;
+                        if dst + 3 < bgra.len() {
+                            let (color, alpha) = match (and_bit, xor_bit) {
+                                (1, 0) => (0u8, 0u8),
+                                (0, 0) => (0u8, 255u8),
+                                (0, 1) => (255u8, 255u8),
+                                _ => (128u8, 128u8),
+                            };
+                            bgra[dst] = color;
+                            bgra[dst + 1] = color;
+                            bgra[dst + 2] = color;
+                            bgra[dst + 3] = alpha;
+                        }
+                    }
+                }
+            }
+            self.cursor.shape = bgra;
+        }
+    }
+
+    /// Blit the cursor stored in `self.cursor` onto `self.buffer` (BGRA/RGBA).
+    /// Alpha-blends the cursor shape at the current cursor position, clipping
+    /// to the output rectangle.
+    fn overlay_cursor(&mut self) {
+        if !self.cursor.visible || self.cursor.shape.is_empty() {
+            return;
+        }
+
+        // DXGI PointerPosition.Position is relative to the output's upper-left corner.
+        let cur_x = self.cursor.pos_x - self.cursor.hot_x;
+        let cur_y = self.cursor.pos_y - self.cursor.hot_y;
+        let cw = self.cursor.shape_width;
+        let ch = self.cursor.shape_height;
+        let fw = self.width as i32;
+        let fh = self.height as i32;
+
+        let src_x0 = (-cur_x).max(0);
+        let src_y0 = (-cur_y).max(0);
+        let dst_x0 = cur_x.max(0);
+        let dst_y0 = cur_y.max(0);
+        let blit_w = (cw - src_x0).min(fw - dst_x0);
+        let blit_h = (ch - src_y0).min(fh - dst_y0);
+
+        if blit_w <= 0 || blit_h <= 0 {
+            return;
+        }
+
+        let is_rgba = self.pixel_format == "rgba";
+
+        for row in 0..blit_h as usize {
+            let sy = (src_y0 as usize + row) * cw as usize;
+            let dy = (dst_y0 as usize + row) * fw as usize;
+            for col in 0..blit_w as usize {
+                let sp = (sy + src_x0 as usize + col) * 4;
+                let dp = (dy + dst_x0 as usize + col) * 4;
+
+                if sp + 3 >= self.cursor.shape.len() || dp + 3 >= self.buffer.len() {
+                    continue;
+                }
+
+                let (cb, cg, cr, ca) = (
+                    self.cursor.shape[sp] as u32,
+                    self.cursor.shape[sp + 1] as u32,
+                    self.cursor.shape[sp + 2] as u32,
+                    self.cursor.shape[sp + 3] as u32,
+                );
+                if ca == 0 {
+                    continue;
+                }
+
+                let (fb, fg, fr) = if is_rgba {
+                    (
+                        self.buffer[dp + 2] as u32,
+                        self.buffer[dp + 1] as u32,
+                        self.buffer[dp] as u32,
+                    )
+                } else {
+                    (
+                        self.buffer[dp] as u32,
+                        self.buffer[dp + 1] as u32,
+                        self.buffer[dp + 2] as u32,
+                    )
+                };
+
+                let inv = 255 - ca;
+                let rb = ((cb * ca + fb * inv) / 255) as u8;
+                let rg = ((cg * ca + fg * inv) / 255) as u8;
+                let rr = ((cr * ca + fr * inv) / 255) as u8;
+
+                if is_rgba {
+                    self.buffer[dp] = rr;
+                    self.buffer[dp + 1] = rg;
+                    self.buffer[dp + 2] = rb;
+                } else {
+                    self.buffer[dp] = rb;
+                    self.buffer[dp + 1] = rg;
+                    self.buffer[dp + 2] = rr;
+                }
+            }
+        }
     }
 }
 

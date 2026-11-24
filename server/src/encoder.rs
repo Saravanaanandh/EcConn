@@ -58,7 +58,7 @@ impl Encoder {
         fps: u32,
         frames: SyncSender<EncodedFrame>,
         encode_path: &str,
-        need_scale: bool,
+        _need_scale: bool,
         rotation: u32,
     ) -> Result<Self> {
         let gop: u32 = fps / 2;
@@ -84,15 +84,21 @@ impl Encoder {
         // Assemble video filters: rotation/transpose and scaling as needed.
         // DXGI hands us the surface in its unrotated orientation; the desktop
         // image inside it is rotated, so transposing recovers what the user
-        // sees. 1 = identity, 2 = 90°, 3 = 180°, 4 = 270°.
+        // sees. 1/0 = identity, 2/90 = 90°, 3/180 = 180°, 4/270 = 270°.
         let mut filters = Vec::new();
         match rotation {
-            2 => filters.push("transpose=1".to_string()),
-            3 => filters.push("hflip,vflip".to_string()),
-            4 => filters.push("transpose=2".to_string()),
+            2 | 90 => filters.push("transpose=1".to_string()),
+            3 | 180 => filters.push("hflip,vflip".to_string()),
+            4 | 270 => filters.push("transpose=2".to_string()),
             _ => {}
         }
-        if need_scale {
+
+        let (transposed_w, transposed_h) = match rotation {
+            2 | 90 | 4 | 270 => (capture_height, capture_width),
+            _ => (capture_width, capture_height),
+        };
+        let effective_need_scale = (width != transposed_w) || (height != transposed_h);
+        if effective_need_scale {
             filters.push(format!("scale={}:{}", width, height));
         }
 

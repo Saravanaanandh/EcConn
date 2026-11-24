@@ -62,7 +62,7 @@ impl Decoder {
             .arg("-loglevel")
             .arg("error")
             // The format is known, so do not spend time probing the stream.
-            .args(["-probesize", "32"])
+            .args(["-probesize", "4096"])
             .args(["-analyzeduration", "0"])
             // No output reordering delay; we always want the freshest frame.
             .args(["-flags", "low_delay"])
@@ -81,7 +81,7 @@ impl Decoder {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())
             .spawn()
             .context("failed to spawn ffmpeg for decoding - is it installed and on PATH?")?;
 
@@ -157,7 +157,7 @@ impl Decoder {
             .arg("-hide_banner")
             .arg("-loglevel")
             .arg("error")
-            .args(["-probesize", "32"])
+            .args(["-probesize", "4096"])
             .args(["-analyzeduration", "0"])
             .args(["-flags", "low_delay"])
             .args(["-f", "h264", "-i", "pipe:0"])
@@ -169,7 +169,7 @@ impl Decoder {
             .arg("pipe:1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())
             .spawn()
             .context("failed to respawn ffmpeg for decoding")?;
 

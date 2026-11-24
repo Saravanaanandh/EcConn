@@ -226,8 +226,8 @@ mod platform {
         let vw = (unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) } as i64).max(1);
         let vh = (unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) } as i64).max(1);
 
-        let ax = ((px - vx) * 65535 / (vw - 1).max(1)) as i32;
-        let ay = ((py - vy) * 65535 / (vh - 1).max(1)) as i32;
+        let ax = (((px - vx) * 65535 / (vw - 1).max(1)) as i32).clamp(0, 65535);
+        let ay = (((py - vy) * 65535 / (vh - 1).max(1)) as i32).clamp(0, 65535);
 
         let input = INPUT {
             r#type: INPUT_MOUSE,

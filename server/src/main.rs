@@ -124,7 +124,7 @@ fn run() -> Result<()> {
     }
 
     let dest: SocketAddr = value(&args, "--dest")
-        .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_CLIENT_PORT}"))
+        .unwrap_or_else(|| format!("127.0.0.1:{DEFAULT_CLIENT_PORT}"))
         .parse()
         .context("--dest must look like 192.168.50.2:9100")?;
     let bind: SocketAddr = value(&args, "--bind")
@@ -212,7 +212,8 @@ fn run() -> Result<()> {
         eprintln!("--virtual is Windows-only; falling back to the primary monitor");
     }
 
-    if orientation != 0 {
+    let explicit_orientation = value(&args, "--orientation").is_some();
+    if explicit_orientation {
         let monitors = capture::Capture::list_monitors()?;
         if let Some(m) = monitors.get(monitor_index as usize) {
             #[cfg(windows)]
@@ -225,12 +226,6 @@ fn run() -> Result<()> {
     // Create capture with selected monitor index
     let mut capture = capture::Capture::new(monitor_index)?;
 
-    // If user did not explicitly specify width & height, use monitor's native capture resolution
-    let (mut encode_width, mut encode_height) = if value(&args, "--width").is_some() || value(&args, "--height").is_some() {
-        (width, height)
-    } else {
-        (capture.width(), capture.height())
-    };
     if orientation == 0 {
         orientation = match capture.rotation() {
             2 => 90,
@@ -239,6 +234,16 @@ fn run() -> Result<()> {
             _ => 0,
         };
     }
+
+    // If user did not explicitly specify width & height, use monitor's native capture resolution.
+    // In portrait orientation (90° or 270°), the stream is transposed upright so width and height swap.
+    let (mut encode_width, mut encode_height) = if value(&args, "--width").is_some() || value(&args, "--height").is_some() {
+        (width, height)
+    } else if capture.rotation() == 2 || capture.rotation() == 4 || orientation == 90 || orientation == 270 {
+        (capture.height(), capture.width())
+    } else {
+        (capture.width(), capture.height())
+    };
 
     // Print capture info - use the actual captured output's resolution
     println!(
@@ -404,16 +409,21 @@ fn run() -> Result<()> {
         // A desktop mode change resizes the capture; ffmpeg was told the old
         // input size, so restart it before feeding the new-sized buffer.
         if capture.take_size_change() {
-            if value(&args, "--width").is_none() && value(&args, "--height").is_none() {
-                encode_width = capture.width();
-                encode_height = capture.height();
-            }
             orientation = match capture.rotation() {
                 2 => 90,
                 3 => 180,
                 4 => 270,
                 _ => 0,
             };
+            if value(&args, "--width").is_none() && value(&args, "--height").is_none() {
+                if capture.rotation() == 2 || capture.rotation() == 4 || orientation == 90 || orientation == 270 {
+                    encode_width = capture.height();
+                    encode_height = capture.width();
+                } else {
+                    encode_width = capture.width();
+                    encode_height = capture.height();
+                }
+            }
             need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
             encoder.finish()?;
             encoder = Encoder::new(
@@ -439,10 +449,10 @@ fn run() -> Result<()> {
             let new_rect = input::MonitorRect {
                 left: capture.x(),
                 top: capture.y(),
-                width: capture.width(),
-                height: capture.height(),
+                width: encode_width,
+                height: encode_height,
             };
-            let _ = config_tx.send((capture.width(), capture.height(), orientation.into(), capture.rotation() as u8, new_rect));
+            let _ = config_tx.send((encode_width, encode_height, orientation.into(), capture.rotation() as u8, new_rect));
         }
 
         if acquired.new_frame {
