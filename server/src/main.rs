@@ -51,6 +51,7 @@ fn print_help() {
          --width <W>            Encode/stream width in pixels (default: 1280)\n\
          --height <H>           Encode/stream height in pixels (default: 720)\n\
          --fps <n>              Frames per second (default: 30)\n\
+         --token <n>            Only accept input carrying this pairing token (default: 0 = accept first)\n\
          --orientation <n>      Display orientation: 0, 90, 180, 270 (default: 0) (M9)\n\
          --encode-path <name>   Video encoder path (default: auto, auto-detect: nvenc>qsv>amf>libx264; force: nvenc|qsv|amf|libx264)\n\
          --monitor <index>      DXGI output index to capture (default: 0) (M6)\n\
@@ -155,6 +156,13 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| "0".to_string())
         .parse()
         .context("--seconds must be a number")?;
+
+    // M7 UI pairing: only input datagrams carrying this token may inject.
+    // 0 keeps the legacy "first token wins" behaviour for plain CLI use.
+    let input_token: u64 = value(&args, "--token")
+        .map(|text| text.parse().context("--token must be a non-negative integer"))
+        .transpose()?
+        .unwrap_or(0);
 
     // Encoder path: if user specified --encode-path, use it directly;
     // otherwise auto-detect.
@@ -275,6 +283,7 @@ fn run() -> Result<()> {
         capture.rotation() as u8,
         encode_width,
         encode_height,
+        input_token,
     );
 
     println!(

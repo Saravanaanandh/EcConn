@@ -1,0 +1,25 @@
+[package]
+name = "app-receiver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+common = { path = "../common" }
+# The video path is the existing client code: same UDP receiver, same ffmpeg
+# decoder. Only the renderer (SDL2 in client/src/main.rs) is replaced by egui.
+client = { path = "../client" }
+# GUI. `glow` is the lighter eframe backend; x11/wayland are needed on Linux.
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+mdns-sd = "0.22"
+
+# Screen size for the discovery beacon: reuse the existing DXGI monitor
+# enumeration instead of duplicating Win32 calls.
+[target.'cfg(windows)'.dependencies]
+server = { path = "../server" }

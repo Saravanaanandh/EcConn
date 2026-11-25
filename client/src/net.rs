@@ -126,17 +126,32 @@ impl Receiver {
     /// Create the input sender before `spawn` consumes the receiver. It uses
     /// a clone of the same socket, so input and video share one local port.
     pub fn input_sender(&self) -> Result<InputSender> {
+        self.input_sender_inner(None)
+    }
+
+    /// Use the token agreed during pairing. A zero token falls back to the
+    /// random per-run token used by [`Receiver::input_sender`].
+    pub fn input_sender_with_token(&self, token: u64) -> Result<InputSender> {
+        self.input_sender_inner(Some(token))
+    }
+
+    fn input_sender_inner(&self, forced_token: Option<u64>) -> Result<InputSender> {
         let socket = self
             .socket
             .try_clone()
             .context("cloning the UDP socket for input failed")?;
-        // A non-zero session token unique to this client run. The server
-        // accepts the first token it sees and rejects anything else.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        let token = (nanos ^ ((std::process::id() as u64) << 32)) | 1;
+        let token = match forced_token {
+            Some(token) if token != 0 => token,
+            _ => {
+                // A non-zero session token unique to this client run. The
+                // server accepts the first token it sees unless paired.
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                (nanos ^ ((std::process::id() as u64) << 32)) | 1
+            }
+        };
         Ok(InputSender {
             socket,
             server: self.server,

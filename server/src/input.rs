@@ -34,6 +34,8 @@ pub struct InputInjector {
     rect: MonitorRect,
     /// Session token; 0 until the first datagram establishes it.
     token: u64,
+    /// Token enforced by pairing. 0 keeps the old "first token wins" behaviour.
+    expected_token: u64,
     last_seq: u16,
     have_seq: bool,
     /// Currently held mouse buttons (bit 0=left, 1=right, 2=middle).
@@ -47,10 +49,13 @@ pub struct InputInjector {
 }
 
 impl InputInjector {
-    pub fn new(rect: MonitorRect) -> Self {
+    /// Pairing-aware constructor: reject every datagram whose token differs
+    /// from `expected_token`. Pass 0 to keep the legacy accept-first behaviour.
+    pub fn with_token(rect: MonitorRect, expected_token: u64) -> Self {
         Self {
             rect,
             token: 0,
+            expected_token,
             last_seq: 0,
             have_seq: false,
             pressed_buttons: 0,
@@ -76,6 +81,11 @@ impl InputInjector {
 
         // Session token: first non-zero token wins, then it must match.
         if token == 0 {
+            self.rejected += 1;
+            return;
+        }
+        // Pairing enforcement: only the token agreed during pairing may inject.
+        if self.expected_token != 0 && token != self.expected_token {
             self.rejected += 1;
             return;
         }

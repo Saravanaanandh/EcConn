@@ -76,6 +76,11 @@ fn run() -> Result<()> {
         Some(text) => text.parse().context("--seconds must be a number")?,
         None => 0,
     };
+    // M7 UI pairing: input datagrams must carry the token agreed with the host.
+    let input_token: u64 = value(&args, "--token")
+        .map(|text| text.parse().context("--token must be a non-negative integer"))
+        .transpose()?
+        .unwrap_or(0);
 
     // Runtime diagnostics: show exactly which ports the processes are using.
     println!("client_ports: bind={bind} server={server}");
@@ -115,7 +120,11 @@ fn run() -> Result<()> {
     let (decoder, sink) = Decoder::new(width, height)?;
     let receiver = Receiver::new(bind, server, width, height, config_tx, stats.clone(), running.clone())?;
     // The sender must be created before spawn() consumes the receiver.
-    let mut input = receiver.input_sender()?;
+    let mut input = if input_token != 0 {
+        receiver.input_sender_with_token(input_token)?
+    } else {
+        receiver.input_sender()?
+    };
     let net_thread = receiver.spawn(decoder);
 
     if let Some(orient) = orientation_arg {

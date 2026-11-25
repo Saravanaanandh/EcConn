@@ -35,6 +35,13 @@
 // Redistribution of this source is permitted under the MIT license that
 // governs the rest of this project.
 
+// M7 UI: LAN discovery, pairing protocol/state machine, and the on-disk store
+// of paired hosts. Kept in `common` so both GUI apps and the unit tests use
+// exactly the same wire format.
+pub mod discovery;
+pub mod pairing;
+pub mod store;
+
 // How many datagrams a frame of `payload_bytes` needs.
 pub const MAX_PAYLOAD: usize = 1200;
 pub fn packet_count(payload_bytes: usize) -> u16 {

@@ -1,0 +1,23 @@
+[package]
+name = "app-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+common = { path = "../common" }
+# GUI. `glow` is the lighter eframe backend; x11/wayland are no-ops on Windows.
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+mdns-sd = "0.22"
+
+# The host drives the existing server code: the virtual-display and monitor
+# enumeration modules are called in-process, while the capture/encode/stream
+# pipeline is run by the existing `server` binary.
+[target.'cfg(windows)'.dependencies]
+server = { path = "../server" }

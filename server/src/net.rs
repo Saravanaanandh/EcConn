@@ -49,10 +49,11 @@ impl NetSender {
         rotation: u8,
         frame_width: u32,
         frame_height: u32,
+        input_token: u64,
     ) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("udp-sender".into())
-            .spawn(move || self.run(frames, force_keyframe, pending_orientation, config_rx, rect, orientation, rotation, frame_width, frame_height))
+            .spawn(move || self.run(frames, force_keyframe, pending_orientation, config_rx, rect, orientation, rotation, frame_width, frame_height, input_token))
             .expect("spawning the udp sender thread failed")
     }
 
@@ -68,6 +69,7 @@ impl NetSender {
         rotation: u8,
         frame_width: u32,
         frame_height: u32,
+        input_token: u64,
     ) {
         let mut datagram = [0u8; DATAGRAM_SIZE];
         let mut control = [0u8; 64];
@@ -77,7 +79,7 @@ impl NetSender {
         let mut sent_bytes = 0u64;
         let mut keyframe_requests = 0u64;
         let mut last_report = Instant::now();
-        let mut input = InputInjector::new(rect);
+        let mut input = InputInjector::with_token(rect, input_token);
 
         // DisplayConfig describes the encoded frame (what the decoder must
         // output); `rect` is only the monitor rectangle used for input.
