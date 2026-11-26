@@ -141,7 +141,10 @@ impl Encoder {
         }
 
         // COMMON: output format must be LAST. ffmpeg reads -f h264 pipe:1 after all codec options.
-        cmd.arg("-f").arg("h264").arg("pipe:1");
+        // Force yuv420p so hardware decoders (especially Android MediaCodec / Qualcomm c2.qti.avc.decoder)
+        // receive 8-bit 4:2:0 instead of High 4:4:4 Predictive (profile 244) from BGRA input.
+        cmd.arg("-pix_fmt").arg("yuv420p")
+           .arg("-f").arg("h264").arg("pipe:1");
 
         eprintln!("ffmpeg command: {:#?}", cmd);
 

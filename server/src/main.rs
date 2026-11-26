@@ -220,8 +220,10 @@ fn run() -> Result<()> {
         eprintln!("--virtual is Windows-only; falling back to the primary monitor");
     }
 
+    let is_virtual_monitor = _virtual_guard.is_some();
+
     let explicit_orientation = value(&args, "--orientation").is_some();
-    if explicit_orientation {
+    if explicit_orientation && is_virtual_monitor {
         let monitors = capture::Capture::list_monitors()?;
         if let Some(m) = monitors.get(monitor_index as usize) {
             #[cfg(windows)]
@@ -315,7 +317,7 @@ fn run() -> Result<()> {
         frames_tx.clone(),
         &encode_path,
         need_scale,
-        orientation.into(),
+        capture.rotation(),
     )?;
 
     println!("streaming - press Ctrl+C to stop");
@@ -347,15 +349,26 @@ fn run() -> Result<()> {
         if req_orient != 0xFFFF {
             let new_orient = req_orient as u16;
             #[cfg(windows)]
-            {
+            if is_virtual_monitor {
                 let (w, h) = orientation::apply_orientation(&capture.name(), new_orient, encode_width, encode_height);
                 encode_width = w;
                 encode_height = h;
+            } else {
+                eprintln!("ignoring runtime orientation request for physical monitor {}", capture.name());
             }
             orientation = new_orient;
             println!("orientation changed to {new_orient}°, target size {encode_width}x{encode_height}");
             let _ = capture.force_recreate();
-            need_scale = (encode_width != capture.width()) || (encode_height != capture.height());
+            let (upright_w, upright_h) = if capture.rotation() == 2 || capture.rotation() == 4 {
+                (capture.height(), capture.width())
+            } else {
+                (capture.width(), capture.height())
+            };
+            if is_virtual_monitor {
+                encode_width = upright_w;
+                encode_height = upright_h;
+            }
+            need_scale = (encode_width != upright_w) || (encode_height != upright_h);
             let _ = encoder.finish();
             if let Ok(enc) = Encoder::new(
                 capture.width(),
@@ -367,7 +380,7 @@ fn run() -> Result<()> {
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
-                orientation.into(),
+                capture.rotation(),
             ) {
                 encoder = enc;
             }
@@ -398,7 +411,7 @@ fn run() -> Result<()> {
                 frames_tx.clone(),
                 &encode_path,
                 need_scale,
-                orientation.into(),
+                capture.rotation(),
             ) {
                 encoder = enc;
             }

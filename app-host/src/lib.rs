@@ -449,7 +449,7 @@ impl HostSession {
             .arg(config.token.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if config.orientation != 0 {
+        if config.orientation != 0 && virtual_attached {
             command.arg("--orientation").arg(config.orientation.to_string());
         }
 

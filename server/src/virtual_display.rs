@@ -177,7 +177,22 @@ pub fn attach(width: u32, height: u32, fps: u32) -> Result<u32> {
     // by name (falling back to "one more output than before").
     let before = Capture::list_monitors().context("listing monitors before attaching")?;
 
-    let target = previous_count + 1;
+    // If a virtual display is already present (more than the 2 physical monitors):
+    if before.len() > 2 {
+        let monitor = before.last().unwrap();
+        eprintln!(
+            "virtual display: reusing existing virtual monitor {} ({}x{} at ({},{}), name='{}')",
+            monitor.index,
+            monitor.width,
+            monitor.height,
+            monitor.left,
+            monitor.top,
+            monitor.name
+        );
+        return Ok(monitor.index);
+    }
+
+    let target = 1; // Exactly 1 virtual monitor needed for the client
     set_display_count(target)
         .with_context(|| format!("asking the driver for {target} display(s)"))?;
     eprintln!(

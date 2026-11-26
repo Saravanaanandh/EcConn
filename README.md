@@ -340,4 +340,75 @@ running for 4 s and reported window titles `lowlat-screen host` and
 - **Video encryption**: out of scope for this milestone; the 32-byte key is
   stored for the next task.
 
+## M11: Android receiver (work in progress)
+
+The Android receiver milestone builds on the M10 GUI milestone. A new
+`android/` Gradle project (Kotlin, Jetpack Compose, minSdk 26) implements a
+receiver that speaks the existing UDP protocol unchanged.
+
+### Requirements
+- Advertsie via NSD/mDNS `_lowlat._udp` with name, screen width/height, orientation
+- Allow/Deny dialog with 6-digit code; same pairing messages as Rust `app-receiver`
+- Receive UDP, reassemble frames, decode H.264 with MediaCodec (low-latency, hardware)
+  straight to a SurfaceView; no ffmpeg
+- Touch input: tap = left click, long press = right click, drag = mouse move,
+  two-finger scroll, optional on-screen keyboard; normalized coords in existing input
+  message format
+- Keep screen on (`FLAG_KEEP_SCREEN_ON`), fullscreen immersive, handle rotation by
+  recreating surface and telling host new size/orientation, reconnect on network change
+- Build with Gradle, run unit tests for packet reassembly reusing Rust test vectors
+
+### Protocol constants (unchanged from M10)
+- Magic: `0x4C4C5332`, version 1, 24-byte big-endian header
+- `MAX_PAYLOAD=1200`, flags bit0 keyframe / bit1 keyframe request
+- Beacon `LOWLAT1|id|name|platform|w|h|orient|video_port|pair_port` on 9200
+- Pairing on 9201, video 9100, host control 9000
+- mDNS TXT keys `id,name,platform,w,h,orient,pair` (port = video port)
+- Android sends control/keyframe/input to video datagram's source IP + 9000
+- Dedicated `DatagramSocket` for input (token + seq from pairing)
+- `SetOrientation` on device rotation (no resize message; new size re-advertised via NSD)
+
+### Project structure
+- `:protocol` — pure-Kotlin/JVM module with wire formats, FrameAssembler, PairingMachine,
+  PairedHostStore, InputCodec, SdlKeys, Avc, and unit tests using Rust wire vectors
+- `:app` — Android Compose app with NSD Advertiser, PairingService, VideoSession,
+  H264Decoder/Avc, ControlClient, touch mapper, Compose UI, keyboard, network callback,
+  immersive/keep-screen-on
+
+### Toolchain
+- Gradle 8.14.3, AGP 8.11.x, Kotlin 2.1.21, Compose BOM 2025.06.01
+- compileSdk/targetSdk 35, minSdk 26
+- JDK 17 target (JDK 21 available)
+
+### Build
+```bash
+# Ensure SDK components are installed
+sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+sdkmanager --licences
+
+# Run protocol unit tests (reuse Rust vectors)
+./gradlew :protocol:test
+
+# Build the Android app
+./gradlew :app:assembleDebug
+```
+
+### NOT RUN (no real device available)
+- NSD on-device discovery and pairing
+- MediaCodec on-device H.264 hardware decode
+- Touch/rotation/network-change behavior on device
+- On-screen keyboard input on device
+
+### Wire vector compatibility
+The `common/examples/wire_vectors.rs` example prints deterministic hex vectors
+that the Kotlin unit tests assert against, ensuring byte-for-byte protocol
+compatibility with the Rust `common` crate.
+
+### Reference
+- Protocol research: `client/src/net.rs`, `common/src/lib.rs`,
+  `common/src/discovery.rs`, `common/src/pairing.rs`, `common/src/store.rs`,
+  `app-receiver/src/lib.rs`, `app-host/src/lib.rs`, `server/src/net.rs`,
+  `docs/ORIENTATION.md`
+```
+
 

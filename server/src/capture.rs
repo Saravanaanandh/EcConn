@@ -667,18 +667,46 @@ impl Capture {
     /// Blit the cursor stored in `self.cursor` onto `self.buffer` (BGRA/RGBA).
     /// Alpha-blends the cursor shape at the current cursor position, clipping
     /// to the output rectangle.
+    ///
+    /// When the DXGI output is rotated (`self.rotation` = 2/90°, 3/180°, 4/270°),
+    /// `GetFramePointerShape` still delivers the cursor bitmap in upright desktop
+    /// orientation while `self.buffer` holds the unrotated panel buffer (which
+    /// `ffmpeg` will later transpose upright). Pre-rotating the cursor shape and
+    /// hotspot to match `self.buffer` keeps the cursor upright and aligned.
     fn overlay_cursor(&mut self) {
         if !self.cursor.visible || self.cursor.shape.is_empty() {
             return;
         }
 
-        // DXGI PointerPosition.Position is relative to the output's upper-left corner.
-        let cur_x = self.cursor.pos_x - self.cursor.hot_x;
-        let cur_y = self.cursor.pos_y - self.cursor.hot_y;
-        let cw = self.cursor.shape_width;
-        let ch = self.cursor.shape_height;
+        let orig_w = self.cursor.shape_width;
+        let orig_h = self.cursor.shape_height;
+        if orig_w <= 0 || orig_h <= 0 {
+            return;
+        }
+
+        let (cw, ch, eff_hx, eff_hy) = match self.rotation {
+            2 => (orig_h, orig_w, self.cursor.hot_y, orig_w - 1 - self.cursor.hot_x),
+            3 => (orig_w, orig_h, orig_w - 1 - self.cursor.hot_x, orig_h - 1 - self.cursor.hot_y),
+            4 => (orig_h, orig_w, orig_h - 1 - self.cursor.hot_y, self.cursor.hot_x),
+            _ => (orig_w, orig_h, self.cursor.hot_x, self.cursor.hot_y),
+        };
+
         let fw = self.width as i32;
         let fh = self.height as i32;
+
+        // DXGI PointerPosition.Position is in upright desktop coordinates, whereas
+        // self.buffer is in the unrotated panel layout when self.rotation != 1.
+        // Map (pos_x, pos_y) into self.buffer coordinates so ffmpeg's transpose
+        // lands the cursor at the exact desktop position.
+        let (buf_x, buf_y) = match self.rotation {
+            2 => (self.cursor.pos_y, fh - 1 - self.cursor.pos_x),
+            3 => (fw - 1 - self.cursor.pos_x, fh - 1 - self.cursor.pos_y),
+            4 => (fw - 1 - self.cursor.pos_y, self.cursor.pos_x),
+            _ => (self.cursor.pos_x, self.cursor.pos_y),
+        };
+
+        let cur_x = buf_x - eff_hx;
+        let cur_y = buf_y - eff_hy;
 
         let src_x0 = (-cur_x).max(0);
         let src_y0 = (-cur_y).max(0);
@@ -694,10 +722,20 @@ impl Capture {
         let is_rgba = self.pixel_format == "rgba";
 
         for row in 0..blit_h as usize {
-            let sy = (src_y0 as usize + row) * cw as usize;
             let dy = (dst_y0 as usize + row) * fw as usize;
+            let eff_y = src_y0 + row as i32;
             for col in 0..blit_w as usize {
-                let sp = (sy + src_x0 as usize + col) * 4;
+                let eff_x = src_x0 + col as i32;
+                let (sx, sy) = match self.rotation {
+                    2 => (orig_w - 1 - eff_y, eff_x),
+                    3 => (orig_w - 1 - eff_x, orig_h - 1 - eff_y),
+                    4 => (eff_y, orig_h - 1 - eff_x),
+                    _ => (eff_x, eff_y),
+                };
+                if sx < 0 || sy < 0 || sx >= orig_w || sy >= orig_h {
+                    continue;
+                }
+                let sp = (sy as usize * orig_w as usize + sx as usize) * 4;
                 let dp = (dy + dst_x0 as usize + col) * 4;
 
                 if sp + 3 >= self.cursor.shape.len() || dp + 3 >= self.buffer.len() {

@@ -269,10 +269,21 @@ pub fn install() -> Result<()> {
     seed_settings()?;
 
     if let Some(info) = device_info() {
-        println!(
-            "device already present: {} (not creating another one)",
-            info.instance_id
-        );
+        if info.problem != 0 {
+            println!(
+                "device {} is present but has problem code {}; removing and reinstalling...",
+                info.instance_id, info.problem
+            );
+            let _ = remove_package(&dir);
+            std::thread::sleep(Duration::from_millis(1000));
+            println!("creating the Root\\MttVDD device and installing the driver package ...");
+            install_package(&dir)?;
+        } else {
+            println!(
+                "device already present: {} (not creating another one)",
+                info.instance_id
+            );
+        }
     } else {
         println!("creating the Root\\MttVDD device and installing the driver package ...");
         install_package(&dir)?;
