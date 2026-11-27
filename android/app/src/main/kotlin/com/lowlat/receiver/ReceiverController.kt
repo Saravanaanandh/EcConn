@@ -332,6 +332,11 @@ class ReceiverController(
                     }
 
                     val len = packet.length
+                    if (len == 10 && String(buf, 0, len, StandardCharsets.UTF_8) == "ECCONN_BYE") {
+                        Log.i(TAG, "Host disconnected (ECCONN_BYE)")
+                        disconnect()
+                        continue
+                    }
                     if (len < Wire.HEADER_LEN) continue
 
                     // Check for DisplayConfig message (frame_id 0, packet_count 1, msg_type 0x07)
@@ -477,6 +482,17 @@ class ReceiverController(
     }
 
     fun disconnect() {
+        val hostAddr = currentHostAddress
+        if (hostAddr != null) {
+            Thread {
+                try {
+                    val bye = "ECCONN_BYE".toByteArray(StandardCharsets.UTF_8)
+                    val pkt = DatagramPacket(bye, bye.size, hostAddr, Wire.CONTROL_PORT)
+                    controlSocket?.send(pkt)
+                } catch (_: Exception) {
+                }
+            }.start()
+        }
         sendReleaseAll()
         currentHostAddress = null
         currentHostName = ""

@@ -1,7 +1,36 @@
-/target
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Release / installer / portable bundles
+/dist/
+*.exe
+*.msi
+*.AppImage
+*.deb
+
+# Android / Gradle / Kotlin
+android/.gradle/
+android/.kotlin/
+android/build/
+android/**/build/
+android/local.properties
+*.apk
+*.aab
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs, captures & temp files
 out.mp4
 out.h264
 *.mp4
 *.log
+*.tmp
 build_out.txt
 

@@ -178,7 +178,13 @@ impl Receiver {
 
         while self.running.load(Ordering::Relaxed) {
             match self.socket.recv_from(&mut datagram) {
-                Ok((len, _from)) => self.handle_datagram(&datagram[..len], decoder),
+                Ok((len, _from)) => {
+                    if &datagram[..len] == b"ECCONN_BYE" {
+                        self.running.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                    self.handle_datagram(&datagram[..len], decoder);
+                }
                 Err(err)
                     if matches!(
                         err.kind(),

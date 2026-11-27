@@ -3,12 +3,13 @@
 //! Run the GUI with no arguments. `--demo` runs the same discovery/pairing/
 //! streaming code without a window, which is how it is verified on loopback.
 
-#[cfg(windows)]
-use std::net::SocketAddr;
-#[cfg(windows)]
-use std::time::{Duration, Instant};
+mod receiver_pane;
+mod ui_template;
 
 #[cfg(windows)]
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
 use eframe::egui;
 
 #[cfg(windows)]
@@ -29,15 +30,14 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("app-host is Windows-only (it drives DXGI capture and the virtual display driver)");
+    if let Err(err) = run_linux_gui() {
+        eprintln!("error: {err:#}");
+        std::process::exit(1);
+    }
 }
 
-// ---------------------------------------------------------------------------
-// GUI
-// ---------------------------------------------------------------------------
-
-#[cfg(windows)]
-fn run_gui() -> anyhow::Result<()> {
+#[cfg(not(windows))]
+fn run_linux_gui() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([880.0, 840.0])
@@ -48,7 +48,60 @@ fn run_gui() -> anyhow::Result<()> {
         "EcConn",
         options,
         Box::new(|cc| {
-            apply_obsidian_theme(&cc.egui_ctx);
+            ui_template::apply_light_theme(&cc.egui_ctx);
+            let mut pane = receiver_pane::ReceiverPane::new();
+            pane.start().map_err(
+                |err: anyhow::Error| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("{err:#}").into()
+                },
+            )?;
+            Ok(Box::new(LinuxApp { pane }))
+        }),
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+#[cfg(not(windows))]
+struct LinuxApp {
+    pane: receiver_pane::ReceiverPane,
+}
+
+#[cfg(not(windows))]
+impl eframe::App for LinuxApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.pane.poll(&ctx);
+        let is_streaming = self.pane.is_streaming();
+        egui::CentralPanel::default()
+            .frame(if is_streaming {
+                egui::Frame::new().fill(egui::Color32::BLACK)
+            } else {
+                egui::Frame::new().fill(ui_template::BG_CANVAS).inner_margin(egui::Margin::same(28))
+            })
+            .show(ui, |ui| {
+                self.pane.ui(ui, &ctx);
+            });
+        ctx.request_repaint_after(Duration::from_millis(if is_streaming { 16 } else { 200 }));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GUI
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn run_gui() -> anyhow::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([960.0, 620.0])
+            .with_min_inner_size([780.0, 520.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "EcConn",
+        options,
+        Box::new(|cc| {
+            ui_template::apply_light_theme(&cc.egui_ctx);
             let app = HostApp::new().map_err(
                 |err: anyhow::Error| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("{err:#}").into()
@@ -61,126 +114,18 @@ fn run_gui() -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-mod theme {
-    use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke};
-
-    pub const BG_OBSIDIAN: Color32 = Color32::from_rgb(17, 18, 25);
-    pub const CARD_SURFACE: Color32 = Color32::from_rgb(27, 29, 40);
-    pub const CARD_BORDER: Color32 = Color32::from_rgb(43, 46, 63);
-    pub const INSET_WELL: Color32 = Color32::from_rgb(19, 20, 28);
-    pub const INSET_BORDER: Color32 = Color32::from_rgb(35, 38, 53);
-
-    pub const VIOLET: Color32 = Color32::from_rgb(139, 92, 246);
-    pub const VIOLET_LIGHT: Color32 = Color32::from_rgb(167, 139, 250);
-    pub const VIOLET_DIM: Color32 = Color32::from_rgb(59, 45, 102);
-    pub const CYAN: Color32 = Color32::from_rgb(56, 189, 248);
-    pub const MINT: Color32 = Color32::from_rgb(52, 211, 153);
-    pub const AMBER: Color32 = Color32::from_rgb(251, 191, 36);
-    pub const DANGER_BG: Color32 = Color32::from_rgb(59, 25, 34);
-    pub const DANGER_FG: Color32 = Color32::from_rgb(248, 113, 113);
-
-    pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(243, 244, 246);
-    pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(142, 149, 168);
-
-    pub fn card_frame() -> egui::Frame {
-        egui::Frame::new()
-            .fill(CARD_SURFACE)
-            .stroke(Stroke::new(1.0, CARD_BORDER))
-            .corner_radius(CornerRadius::same(18))
-            .inner_margin(Margin::same(16))
-    }
-
-    pub fn inset_frame() -> egui::Frame {
-        egui::Frame::new()
-            .fill(INSET_WELL)
-            .stroke(Stroke::new(1.0, INSET_BORDER))
-            .corner_radius(CornerRadius::same(12))
-            .inner_margin(Margin::same(10))
-    }
-}
-
-#[cfg(windows)]
-fn apply_obsidian_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = theme::BG_OBSIDIAN;
-    visuals.window_fill = theme::CARD_SURFACE;
-    visuals.extreme_bg_color = theme::INSET_WELL;
-    visuals.faint_bg_color = theme::CARD_SURFACE;
-    visuals.widgets.noninteractive.bg_fill = theme::CARD_SURFACE;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_SECONDARY);
-    visuals.widgets.inactive.bg_fill = theme::INSET_WELL;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::INSET_BORDER);
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-    visuals.widgets.hovered.bg_fill = theme::VIOLET_DIM;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::VIOLET_LIGHT);
-    visuals.widgets.active.bg_fill = theme::VIOLET;
-    visuals.selection.bg_fill = theme::VIOLET_DIM;
-    visuals.selection.stroke = egui::Stroke::new(1.0, theme::VIOLET_LIGHT);
-    ctx.set_visuals(visuals);
-}
-
-#[cfg(windows)]
-fn draw_status_dial(
-    ui: &mut egui::Ui,
-    title: &str,
-    subtitle: &str,
-    fraction: f32,
-    accent: egui::Color32,
-) {
-    let size = egui::vec2(126.0, 126.0);
-    let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let painter = ui.painter();
-    let center = rect.center();
-    let radius = 52.0;
-
-    // Inner recessed dial well
-    painter.circle_filled(center, radius - 9.0, theme::INSET_WELL);
-    painter.circle_stroke(center, radius - 9.0, egui::Stroke::new(1.0, theme::INSET_BORDER));
-
-    // Outer track ring
-    painter.circle_stroke(center, radius, egui::Stroke::new(6.0, egui::Color32::from_rgb(35, 38, 56)));
-
-    // Sweeping arc
-    let sweep = fraction.clamp(0.06, 1.0) * std::f32::consts::TAU;
-    let steps = 40;
-    let start_angle = -std::f32::consts::FRAC_PI_2;
-    let mut pts = Vec::with_capacity(steps + 1);
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let a = start_angle + t * sweep;
-        pts.push(center + egui::vec2(a.cos() * radius, a.sin() * radius));
-    }
-    painter.add(egui::Shape::line(
-        pts.clone(),
-        egui::Stroke::new(11.0, egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 45)),
-    ));
-    painter.add(egui::Shape::line(pts, egui::Stroke::new(5.5, accent)));
-
-    // Knob dot at arc end
-    let end_angle = start_angle + sweep;
-    let knob = center + egui::vec2(end_angle.cos() * radius, end_angle.sin() * radius);
-    painter.circle_filled(knob, 5.0, egui::Color32::WHITE);
-    painter.circle_filled(knob, 2.5, theme::VIOLET);
-
-    painter.text(
-        center + egui::vec2(0.0, -5.0),
-        egui::Align2::CENTER_CENTER,
-        title,
-        egui::FontId::proportional(19.0),
-        theme::TEXT_PRIMARY,
-    );
-    painter.text(
-        center + egui::vec2(0.0, 14.0),
-        egui::Align2::CENTER_CENTER,
-        subtitle,
-        egui::FontId::proportional(10.5),
-        theme::TEXT_SECONDARY,
-    );
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    Welcome,
+    Host,
+    Receiver,
 }
 
 #[cfg(windows)]
 struct HostApp {
-    discovery: app_host::Discovery,
+    mode: AppMode,
+    discovery: Option<app_host::Discovery>,
+    receiver_pane: receiver_pane::ReceiverPane,
     devices: Vec<app_host::Device>,
     selected: Option<usize>,
     width: u32,
@@ -200,15 +145,20 @@ struct HostApp {
     host_id: String,
     host_name: String,
     scan_at: Instant,
+    show_connection_info: bool,
+    show_settings: bool,
+    active_token: Option<u64>,
+    active_device: Option<app_host::Device>,
 }
 
 #[cfg(windows)]
 impl HostApp {
     fn new() -> anyhow::Result<Self> {
-        let discovery = app_host::Discovery::start()?;
         let (store, store_path) = app_host::load_store();
         Ok(Self {
-            discovery,
+            mode: AppMode::Welcome,
+            discovery: None,
+            receiver_pane: receiver_pane::ReceiverPane::new(),
             devices: Vec::new(),
             selected: None,
             width: 1280,
@@ -228,6 +178,10 @@ impl HostApp {
             host_id: app_host::host_id(),
             host_name: app_host::host_name(),
             scan_at: Instant::now(),
+            show_connection_info: false,
+            show_settings: false,
+            active_token: None,
+            active_device: None,
         })
     }
 
@@ -317,6 +271,8 @@ impl HostApp {
                                     self.push(line);
                                 }
                                 self.session = Some(session);
+                                self.active_token = Some(outcome.token);
+                                self.active_device = Some(device);
                             }
                             Err(err) => {
                                 self.push(format!("could not start the stream: {err:#}"));
@@ -332,7 +288,49 @@ impl HostApp {
         }
     }
 
+    fn restart_active_session(&mut self) {
+        let (Some(token), Some(device)) = (self.active_token, self.active_device.clone()) else {
+            return;
+        };
+        if let Some(mut session) = self.session.take() {
+            let mut notes = Vec::new();
+            session.stop(|line| notes.push(line.to_string()));
+            for line in notes {
+                self.push(line);
+            }
+        }
+        let config = app_host::SessionConfig {
+            dest: SocketAddr::new(device.addr, device.beacon.video_port),
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            orientation: self.orientation,
+            token,
+            use_virtual: self.use_virtual,
+            mirror_monitor: 0,
+            encode_path: self.encode_path.clone(),
+        };
+        let mut notes = Vec::new();
+        match app_host::HostSession::start(&config, |line| notes.push(line.to_string())) {
+            Ok(session) => {
+                for line in notes {
+                    self.push(line);
+                }
+                self.session = Some(session);
+            }
+            Err(err) => {
+                self.push(format!("could not apply runtime stream settings: {err:#}"));
+            }
+        }
+    }
+
     fn stop_session(&mut self) {
+        if let Some(device) = self.active_device.take() {
+            if let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", 0)) {
+                let _ = sock.send_to(b"ECCONN_BYE", device.video_addr());
+            }
+        }
+        self.active_token = None;
         if let Some(mut session) = self.session.take() {
             let mut notes = Vec::new();
             session.stop(|line| notes.push(line.to_string()));
@@ -342,503 +340,576 @@ impl HostApp {
         }
         self.stats = None;
     }
+
+    fn switch_mode(&mut self, target: AppMode, ctx: &egui::Context) {
+        if self.mode == target {
+            return;
+        }
+        match target {
+            AppMode::Welcome => {
+                self.stop_session();
+                self.pairing = None;
+                self.code = None;
+                self.discovery = None;
+                self.receiver_pane.stop(ctx);
+                self.show_connection_info = false;
+                self.show_settings = false;
+            }
+            AppMode::Host => {
+                self.receiver_pane.stop(ctx);
+                self.show_connection_info = false;
+                if self.discovery.is_none() {
+                    match app_host::Discovery::start() {
+                        Ok(d) => self.discovery = Some(d),
+                        Err(err) => self.push(format!("discovery restart failed: {err:#}")),
+                    }
+                }
+            }
+            AppMode::Receiver => {
+                self.stop_session();
+                self.pairing = None;
+                self.code = None;
+                self.discovery = None;
+                self.show_connection_info = false;
+                if let Err(err) = self.receiver_pane.start() {
+                    self.push(format!("receiver start failed: {err:#}"));
+                }
+            }
+        }
+        self.mode = target;
+    }
 }
 
 #[cfg(windows)]
 impl eframe::App for HostApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_pairing();
+        match self.mode {
+            AppMode::Welcome => {}
+            AppMode::Host => {
+                self.poll_pairing();
+                if self.scan_at.elapsed() >= Duration::from_millis(500) {
+                    if let Some(discovery) = &self.discovery {
+                        self.devices = discovery.snapshot();
+                    }
+                    if self.selected.map_or(true, |index| index >= self.devices.len()) {
+                        self.selected = if self.devices.is_empty() { None } else { Some(0) };
+                    }
+                    self.scan_at = Instant::now();
+                }
 
-        if self.scan_at.elapsed() >= Duration::from_millis(500) {
-            self.devices = self.discovery.snapshot();
-            if self.selected.map_or(true, |index| index >= self.devices.len()) {
-                self.selected = if self.devices.is_empty() { None } else { Some(0) };
+                let mut ended = false;
+                if let Some(session) = &mut self.session {
+                    self.stats = session.latest_stats();
+                    ended = !session.is_running();
+                }
+                if ended {
+                    self.stop_session();
+                    self.push("stream ended");
+                    self.switch_mode(AppMode::Welcome, &ctx);
+                }
             }
-            self.scan_at = Instant::now();
+            AppMode::Receiver => {
+                self.receiver_pane.poll(&ctx);
+                if self.receiver_pane.take_just_disconnected() {
+                    self.switch_mode(AppMode::Welcome, &ctx);
+                }
+            }
         }
 
-        let mut ended = false;
-        if let Some(session) = &mut self.session {
-            self.stats = session.latest_stats();
-            ended = !session.is_running();
+        let is_recv_streaming = self.mode == AppMode::Receiver && self.receiver_pane.is_streaming();
+        if is_recv_streaming {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                .show(ui, |ui| {
+                    self.receiver_pane.ui(ui, &ctx);
+                });
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
         }
-        if ended {
-            self.session = None;
-            self.stats = None;
-            self.push("stream ended");
-        }
+
+        let mut switch_to: Option<AppMode> = None;
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BG_OBSIDIAN).inner_margin(egui::Margin::same(20)))
+            .frame(egui::Frame::new().fill(ui_template::BG_CANVAS).inner_margin(egui::Margin::same(28)))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // ── Top Header ─────────────────────────────────────────
+                if self.mode == AppMode::Receiver {
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(theme::VIOLET_LIGHT, "—");
-                                ui.label(
-                                    egui::RichText::new("ECCONN")
-                                        .size(11.0)
-                                        .strong()
-                                        .color(theme::TEXT_SECONDARY),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("EcConn")
-                                        .size(26.0)
-                                        .strong()
-                                        .color(theme::TEXT_PRIMARY),
-                                );
-                                ui.label(
-                                    egui::RichText::new("Host")
-                                        .size(26.0)
-                                        .strong()
-                                        .color(theme::VIOLET_LIGHT),
-                                );
-                            });
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Wireless Display Hub · {} ({})",
-                                    self.host_name, self.host_id
-                                ))
-                                .size(12.5)
-                                .color(theme::TEXT_SECONDARY),
-                            );
-                        });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (badge_text, badge_color) = if self.session.is_some() {
-                                ("●  LIVE", theme::MINT)
-                            } else if self.pairing.is_some() {
-                                ("●  PAIRING", theme::AMBER)
-                            } else if !self.devices.is_empty() {
-                                ("●  READY", theme::CYAN)
-                            } else {
-                                ("●  SCANNING", theme::VIOLET_LIGHT)
-                            };
-                            egui::Frame::new()
-                                .fill(theme::CARD_SURFACE)
-                                .stroke(egui::Stroke::new(1.0, theme::CARD_BORDER))
-                                .corner_radius(egui::CornerRadius::same(16))
-                                .inner_margin(egui::Margin::symmetric(14, 8))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(badge_text)
-                                            .size(12.0)
-                                            .strong()
-                                            .color(badge_color),
-                                    );
-                                });
-                        });
+                        if ui.add(ui_template::outline_pill_button("← Back", egui::vec2(88.0, 32.0))).clicked() {
+                            switch_to = Some(AppMode::Welcome);
+                        }
                     });
-
-                    ui.add_space(14.0);
-
-                    // ── Hero Dial & Primary Control Card ───────────────────
-                    theme::card_frame().show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (dial_title, dial_sub, dial_frac, dial_accent) =
-                                if let Some(session) = &self.session {
-                                    match self.stats {
-                                        Some((frames, kbit)) => (
-                                            format!("{kbit:.0}k"),
-                                            format!("{frames} frames · {}", session.mode),
-                                            0.88,
-                                            theme::CYAN,
-                                        ),
-                                        None => (
-                                            "LIVE".to_string(),
-                                            format!("{} mode", session.mode),
-                                            0.80,
-                                            theme::MINT,
-                                        ),
-                                    }
-                                } else if let Some(code) = &self.code {
-                                    (code.clone(), "Confirm on phone".to_string(), 0.92, theme::AMBER)
-                                } else if self.pairing.is_some() {
-                                    ("PAIR".to_string(), "Connecting…".to_string(), 0.65, theme::AMBER)
-                                } else {
-                                    (
-                                        format!("{} FPS", self.fps),
-                                        format!("{}×{}", self.width, self.height),
-                                        if self.devices.is_empty() { 0.45 } else { 0.72 },
-                                        theme::VIOLET_LIGHT,
-                                    )
-                                };
-
-                            draw_status_dial(ui, &dial_title, &dial_sub, dial_frac, dial_accent);
-                            ui.add_space(16.0);
-
-                            ui.vertical(|ui| {
-                                if let Some(session) = &self.session {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Streaming ({})",
-                                            session.mode.to_uppercase()
-                                        ))
-                                        .size(16.0)
-                                        .strong()
-                                        .color(theme::TEXT_PRIMARY),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "Target: {}",
-                                            self.selected_device()
-                                                .map(|d| d.video_addr().to_string())
-                                                .unwrap_or_default()
-                                        ))
-                                        .size(12.5)
-                                        .color(theme::CYAN),
-                                    );
-                                } else if let Some(code) = &self.code {
-                                    ui.label(
-                                        egui::RichText::new(format!("Pairing Code: {code}"))
-                                            .size(18.0)
-                                            .strong()
-                                            .color(theme::VIOLET_LIGHT),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Verify this code matches your phone, then tap Allow.",
-                                        )
-                                        .size(12.5)
-                                        .color(theme::TEXT_SECONDARY),
-                                    );
-                                } else if let Some(dev) = self.selected_device() {
-                                    ui.label(
-                                        egui::RichText::new(format!("Target: {}", dev.beacon.name))
-                                            .size(16.0)
-                                            .strong()
-                                            .color(theme::TEXT_PRIMARY),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{} · {}×{} · {} mode",
-                                            dev.addr,
-                                            self.width,
-                                            self.height,
-                                            if self.use_virtual { "Virtual Extend" } else { "Mirror" }
-                                        ))
-                                        .size(12.5)
-                                        .color(theme::TEXT_SECONDARY),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new("Waiting for EcConn Receiver")
-                                            .size(16.0)
-                                            .strong()
-                                            .color(theme::TEXT_PRIMARY),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Open EcConn on your phone on the same Wi-Fi network.",
-                                        )
-                                        .size(12.5)
-                                        .color(theme::TEXT_SECONDARY),
-                                    );
-                                }
-
-                                ui.add_space(12.0);
-                                ui.horizontal(|ui| {
-                                    let can_pair = self.selected.is_some()
-                                        && self.session.is_none()
-                                        && self.pairing.is_none();
-                                    let pair_btn = egui::Button::new(
-                                        egui::RichText::new("  Pair & Connect  ")
-                                            .size(13.5)
-                                            .strong()
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(if can_pair { theme::VIOLET } else { theme::INSET_WELL })
-                                    .corner_radius(egui::CornerRadius::same(14))
-                                    .min_size(egui::vec2(140.0, 36.0));
-                                    if ui.add_enabled(can_pair, pair_btn).clicked() {
-                                        self.start_pairing();
-                                    }
-
-                                    let can_stop = self.session.is_some();
-                                    let stop_btn = egui::Button::new(
-                                        egui::RichText::new("  Stop Stream  ")
-                                            .size(13.5)
-                                            .strong()
-                                            .color(if can_stop {
-                                                theme::DANGER_FG
-                                            } else {
-                                                theme::TEXT_SECONDARY
-                                            }),
-                                    )
-                                    .fill(if can_stop { theme::DANGER_BG } else { theme::INSET_WELL })
-                                    .corner_radius(egui::CornerRadius::same(14))
-                                    .min_size(egui::vec2(120.0, 36.0));
-                                    if ui.add_enabled(can_stop, stop_btn).clicked() {
-                                        self.stop_session();
-                                    }
-
-                                    if self.pairing.is_some() {
-                                        ui.spinner();
-                                        ui.colored_label(theme::AMBER, "Awaiting Allow…");
-                                    }
-                                });
-                            });
-                        });
-                    });
-
-                    ui.add_space(14.0);
-
-                    // ── 2-Column Grid: Receivers & Stream Settings ─────────
+                    ui.add_space(6.0);
+                    self.receiver_pane.ui(ui, &ctx);
+                } else {
                     ui.columns(2, |cols| {
-                        // Left Column: Receivers on LAN
-                        theme::card_frame().show(&mut cols[0], |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Receivers on LAN")
-                                        .size(15.0)
-                                        .strong()
-                                        .color(theme::TEXT_PRIMARY),
-                                );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // ── Left Column: UI Controls ───────────────────────
+                        cols[0].vertical(|ui| {
+                            match self.mode {
+                                AppMode::Welcome => {
+                                    ui.add_space(12.0);
+                                    ui_template::draw_ecconn_header(ui, "EcConn");
+                                    ui.add_space(16.0);
                                     ui.label(
-                                        egui::RichText::new(format!("{} found", self.devices.len()))
-                                            .size(11.5)
+                                        egui::RichText::new("Connect and extend\nanything easily.")
+                                            .size(20.0)
                                             .strong()
-                                            .color(theme::CYAN),
+                                            .color(ui_template::NAVY),
                                     );
-                                });
-                            });
-                            ui.add_space(8.0);
-
-                            if self.devices.is_empty() {
-                                theme::inset_frame().show(ui, |ui| {
-                                    ui.set_min_height(155.0);
-                                    ui.vertical_centered(|ui| {
-                                        ui.add_space(55.0);
-                                        ui.colored_label(
-                                            theme::TEXT_SECONDARY,
-                                            "Scanning LAN via mDNS & UDP…",
-                                        );
+                                    ui.add_space(28.0);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add(ui_template::primary_pill_button("Client", egui::vec2(138.0, 44.0)))
+                                            .clicked()
+                                        {
+                                            switch_to = Some(AppMode::Receiver);
+                                        }
+                                        ui.add_space(12.0);
+                                        if ui
+                                            .add(ui_template::outline_pill_button("Host", egui::vec2(138.0, 44.0)))
+                                            .clicked()
+                                        {
+                                            switch_to = Some(AppMode::Host);
+                                        }
                                     });
-                                });
-                            } else {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("devices")
-                                    .min_scrolled_height(165.0)
-                                    .max_height(175.0)
-                                    .show(ui, |ui| {
-                                        for (index, device) in self.devices.iter().enumerate() {
-                                            let is_sel = self.selected == Some(index);
-                                            let row_frame = egui::Frame::new()
-                                                .fill(if is_sel {
-                                                    theme::VIOLET_DIM
+                                    ui.add_space(36.0);
+                                    ui_template::draw_wifi_banner(ui);
+                                }
+                                AppMode::Host if self.session.is_some() => {
+                                    let session_mode = self.session.as_ref().unwrap().mode;
+                                    ui_template::draw_ecconn_header(ui, "Host");
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new("Connected Successfully")
+                                            .size(20.0)
+                                            .strong()
+                                            .color(ui_template::NAVY),
+                                    );
+                                    ui.add_space(4.0);
+                                    let info_lbl = if self.show_connection_info {
+                                        "Hide Connection Info"
+                                    } else {
+                                        "Connection Info →"
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(info_lbl)
+                                                    .size(13.5)
+                                                    .strong()
+                                                    .color(ui_template::BRAND_BLUE),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.show_connection_info = !self.show_connection_info;
+                                    }
+
+                                    let mut settings_changed = false;
+                                    ui.add_space(12.0);
+                                    ui_template::soft_blue_card().show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.label(
+                                            egui::RichText::new("Stream settings")
+                                                .size(16.0)
+                                                .strong()
+                                                .color(ui_template::NAVY),
+                                        );
+                                        ui.add_space(2.0);
+                                        let peer_name = self
+                                            .selected_device()
+                                            .map(|d| d.beacon.name.clone())
+                                            .unwrap_or_else(|| "Client Device".to_string());
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Connected to {peer_name} · {}",
+                                                if session_mode == "virtual" { "Virtual" } else { "Mirror" }
+                                            ))
+                                            .size(12.5)
+                                            .color(ui_template::SLATE),
+                                        );
+                                        ui.add_space(10.0);
+
+                                        // FPS runtime selector
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("FPS").size(12.5).strong().color(ui_template::NAVY));
+                                            ui.add_space(8.0);
+                                            for preset in [30u32, 60, 90, 120] {
+                                                let active = self.fps == preset;
+                                                let label = format!("{preset}");
+                                                let btn = if active {
+                                                    ui_template::primary_pill_button(&label, egui::vec2(46.0, 28.0))
                                                 } else {
-                                                    theme::INSET_WELL
-                                                })
-                                                .stroke(egui::Stroke::new(
-                                                    1.0,
-                                                    if is_sel {
-                                                        theme::VIOLET_LIGHT
-                                                    } else {
-                                                        theme::INSET_BORDER
-                                                    },
-                                                ))
-                                                .corner_radius(egui::CornerRadius::same(12))
-                                                .inner_margin(egui::Margin::same(10));
-
-                                            let resp = row_frame
-                                                .show(ui, |ui| {
-                                                    ui.set_width(ui.available_width());
-                                                    ui.horizontal(|ui| {
-                                                        ui.vertical(|ui| {
-                                                            ui.label(
-                                                                egui::RichText::new(&device.beacon.name)
-                                                                    .size(13.5)
-                                                                    .strong()
-                                                                    .color(theme::TEXT_PRIMARY),
-                                                            );
-                                                            ui.label(
-                                                                egui::RichText::new(format!(
-                                                                    "{} · {}×{} · @{} [{}]",
-                                                                    device.addr,
-                                                                    device.beacon.width,
-                                                                    device.beacon.height,
-                                                                    device.beacon.platform,
-                                                                    device.source
-                                                                ))
-                                                                .size(11.0)
-                                                                .color(theme::TEXT_SECONDARY),
-                                                            );
-                                                        });
-                                                    });
-                                                })
-                                                .response
-                                                .interact(egui::Sense::click());
-
-                                            if resp.clicked() {
-                                                self.selected = Some(index);
-                                                if let Some(d) = self.devices.get(index) {
-                                                    self.width = d.beacon.width.max(320);
-                                                    self.height = d.beacon.height.max(240);
-                                                    self.orientation = d.beacon.orientation;
+                                                    ui_template::outline_pill_button(&label, egui::vec2(46.0, 28.0))
+                                                };
+                                                if ui.add(btn).clicked() && !active {
+                                                    self.fps = preset;
+                                                    settings_changed = true;
                                                 }
                                             }
+                                        });
+                                        ui.add_space(6.0);
+
+                                        // Orientation runtime selector
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Orient").size(12.5).strong().color(ui_template::NAVY));
                                             ui.add_space(6.0);
-                                        }
-                                    });
-                            }
-
-                            for note in self.discovery.notes() {
-                                ui.colored_label(theme::AMBER, note);
-                            }
-                        });
-
-                        // Right Column: Display & Stream Settings
-                        theme::card_frame().show(&mut cols[1], |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Display & Stream")
-                                        .size(15.0)
-                                        .strong()
-                                        .color(theme::TEXT_PRIMARY),
-                                );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.checkbox(&mut self.use_virtual, "Virtual Extend");
-                                });
-                            });
-                            ui.add_space(8.0);
-
-                            theme::inset_frame().show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Resolution").color(theme::TEXT_SECONDARY));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.add(egui::DragValue::new(&mut self.height).range(240..=2160));
-                                        ui.label("×");
-                                        ui.add(egui::DragValue::new(&mut self.width).range(320..=3840));
-                                    });
-                                });
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("FPS").color(theme::TEXT_SECONDARY));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.add(egui::DragValue::new(&mut self.fps).range(5..=120));
-                                        for preset in [60u32, 30] {
-                                            let active = self.fps == preset;
-                                            let b = egui::Button::new(format!("{preset}"))
-                                                .fill(if active { theme::VIOLET } else { theme::CARD_SURFACE })
-                                                .corner_radius(egui::CornerRadius::same(8));
-                                            if ui.add(b).clicked() {
-                                                self.fps = preset;
+                                            for deg in [0u16, 90, 180, 270] {
+                                                let active = self.orientation == deg;
+                                                let label = format!("{deg}°");
+                                                let btn = if active {
+                                                    ui_template::primary_pill_button(&label, egui::vec2(46.0, 28.0))
+                                                } else {
+                                                    ui_template::outline_pill_button(&label, egui::vec2(46.0, 28.0))
+                                                };
+                                                if ui.add(btn).clicked() && !active {
+                                                    self.orientation = deg;
+                                                    settings_changed = true;
+                                                }
                                             }
-                                        }
-                                    });
-                                });
-                            });
+                                        });
+                                        ui.add_space(6.0);
 
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("Orientation")
-                                    .size(11.5)
-                                    .color(theme::TEXT_SECONDARY),
-                            );
-                            ui.horizontal(|ui| {
-                                for value in [0u16, 90, 180, 270] {
-                                    let active = self.orientation == value;
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new(format!("{value}°"))
-                                            .size(12.0)
-                                            .color(if active { egui::Color32::WHITE } else { theme::TEXT_SECONDARY }),
-                                    )
-                                    .fill(if active { theme::VIOLET } else { theme::INSET_WELL })
-                                    .corner_radius(egui::CornerRadius::same(10));
-                                    if ui.add(btn).clicked() {
-                                        self.orientation = value;
+                                        // Resolution runtime selector
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Res").size(12.5).strong().color(ui_template::NAVY));
+                                            ui.add_space(8.0);
+                                            for (rw, rh, lbl) in [
+                                                (1280u32, 720u32, "720p"),
+                                                (1600u32, 900u32, "900p"),
+                                                (1920u32, 1080u32, "1080p"),
+                                            ] {
+                                                let active = self.width == rw && self.height == rh;
+                                                let btn = if active {
+                                                    ui_template::primary_pill_button(lbl, egui::vec2(58.0, 28.0))
+                                                } else {
+                                                    ui_template::outline_pill_button(lbl, egui::vec2(58.0, 28.0))
+                                                };
+                                                if ui.add(btn).clicked() && !active {
+                                                    self.width = rw;
+                                                    self.height = rh;
+                                                    settings_changed = true;
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                    if self.show_connection_info {
+                                        let session = self.session.as_ref().unwrap();
+                                        ui.add_space(10.0);
+                                        ui_template::white_tile_card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            let target = self
+                                                .selected_device()
+                                                .map(|d| d.video_addr().to_string())
+                                                .unwrap_or_default();
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "Target: {target}  ·  {}×{}  ·  {}",
+                                                    self.width, self.height, self.encode_path
+                                                ))
+                                                .size(12.0)
+                                                .color(ui_template::SLATE),
+                                            );
+                                            if let Some((frames, kbit)) = self.stats {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{frames} frames · {kbit:.0} kbps"
+                                                    ))
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(ui_template::BRAND_BLUE),
+                                                );
+                                            }
+                                            egui::ScrollArea::vertical()
+                                                .id_salt("session-log")
+                                                .max_height(88.0)
+                                                .stick_to_bottom(true)
+                                                .show(ui, |ui| {
+                                                    for line in session.recent(24) {
+                                                        ui.monospace(
+                                                            egui::RichText::new(line)
+                                                                .size(10.5)
+                                                                .color(ui_template::SLATE),
+                                                        );
+                                                    }
+                                                });
+                                        });
+                                    }
+
+                                    ui.add_space(18.0);
+                                    if ui
+                                        .add(ui_template::danger_pill_button("Disconnect", egui::vec2(168.0, 42.0)))
+                                        .clicked()
+                                    {
+                                        self.stop_session();
+                                        switch_to = Some(AppMode::Welcome);
+                                    } else if settings_changed {
+                                        self.restart_active_session();
                                     }
                                 }
-                            });
-
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("Encoder")
-                                    .size(11.5)
-                                    .color(theme::TEXT_SECONDARY),
-                            );
-                            ui.horizontal_wrapped(|ui| {
-                                for value in ["auto", "libx264", "nvenc", "qsv", "amf"] {
-                                    let active = self.encode_path == value;
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new(value)
-                                            .size(11.5)
-                                            .color(if active { egui::Color32::WHITE } else { theme::TEXT_SECONDARY }),
-                                    )
-                                    .fill(if active { theme::VIOLET } else { theme::INSET_WELL })
-                                    .corner_radius(egui::CornerRadius::same(10));
-                                    if ui.add(btn).clicked() {
-                                        self.encode_path = value.to_string();
+                                AppMode::Host if self.pairing.is_some() => {
+                                    ui_template::draw_ecconn_header(ui, "EcConn");
+                                    ui.add_space(16.0);
+                                    ui.label(
+                                        egui::RichText::new("Confirm connection")
+                                            .size(21.0)
+                                            .strong()
+                                            .color(ui_template::NAVY),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Verify the secret code shown on the other device. The code must match on both devices.",
+                                        )
+                                        .size(13.0)
+                                        .color(ui_template::SLATE),
+                                    );
+                                    ui.add_space(22.0);
+                                    let code_str = self.code.as_deref().unwrap_or("··· ···");
+                                    ui.label(
+                                        egui::RichText::new(code_str)
+                                            .size(34.0)
+                                            .strong()
+                                            .monospace()
+                                            .color(ui_template::BRAND_BLUE),
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(
+                                            egui::RichText::new("Waiting for Allow on client device…")
+                                                .size(12.5)
+                                                .color(ui_template::SLATE),
+                                        );
+                                    });
+                                    ui.add_space(22.0);
+                                    if ui
+                                        .add(ui_template::outline_pill_button("Cancel", egui::vec2(140.0, 40.0)))
+                                        .clicked()
+                                    {
+                                        self.pairing = None;
+                                        self.code = None;
                                     }
                                 }
-                            });
-                        });
-                    });
+                                AppMode::Host => {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add(ui_template::outline_pill_button("← Back", egui::vec2(84.0, 32.0)))
+                                            .clicked()
+                                        {
+                                            switch_to = Some(AppMode::Welcome);
+                                        }
+                                        ui.add_space(8.0);
+                                        ui_template::draw_ecconn_header(ui, "Host");
+                                    });
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new("Searching for Client Devices")
+                                            .size(19.0)
+                                            .strong()
+                                            .color(ui_template::NAVY),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("Host Device : {}", self.host_name))
+                                            .size(12.5)
+                                            .color(ui_template::SLATE),
+                                    );
+                                    ui.add_space(14.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Available Devices")
+                                                .size(15.0)
+                                                .strong()
+                                                .color(ui_template::NAVY),
+                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui
+                                                .add(ui_template::primary_pill_button("Refresh", egui::vec2(86.0, 30.0)))
+                                                .clicked()
+                                            {
+                                                if let Some(discovery) = &self.discovery {
+                                                    self.devices = discovery.snapshot();
+                                                }
+                                                self.scan_at = Instant::now();
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(8.0);
 
-                    ui.add_space(14.0);
+                                    if self.devices.is_empty() {
+                                        ui_template::soft_blue_card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label(
+                                                    egui::RichText::new("Scanning LAN for EcConn clients…")
+                                                        .size(13.0)
+                                                        .color(ui_template::SLATE),
+                                                );
+                                            });
+                                        });
+                                    } else {
+                                        let mut connect_idx: Option<usize> = None;
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("devices")
+                                            .max_height(180.0)
+                                            .show(ui, |ui| {
+                                                for (index, device) in self.devices.iter().enumerate() {
+                                                    let is_sel = self.selected == Some(index);
+                                                    egui::Frame::new()
+                                                        .fill(if is_sel {
+                                                            ui_template::CARD_BLUE
+                                                        } else {
+                                                            ui_template::CARD_WHITE
+                                                        })
+                                                        .stroke(egui::Stroke::new(
+                                                            1.0,
+                                                            if is_sel {
+                                                                ui_template::BRAND_BLUE
+                                                            } else {
+                                                                ui_template::CARD_BORDER
+                                                            },
+                                                        ))
+                                                        .corner_radius(egui::CornerRadius::same(12))
+                                                        .inner_margin(egui::Margin::symmetric(12, 8))
+                                                        .show(ui, |ui| {
+                                                            ui.set_width(ui.available_width());
+                                                            ui.horizontal(|ui| {
+                                                                ui.vertical(|ui| {
+                                                                    ui.label(
+                                                                        egui::RichText::new(&device.beacon.name)
+                                                                            .size(13.5)
+                                                                            .strong()
+                                                                            .color(ui_template::NAVY),
+                                                                    );
+                                                                    ui.label(
+                                                                        egui::RichText::new(format!(
+                                                                            "{} · {}×{} · {}",
+                                                                            device.addr,
+                                                                            device.beacon.width,
+                                                                            device.beacon.height,
+                                                                            device.beacon.platform
+                                                                        ))
+                                                                        .size(11.0)
+                                                                        .color(ui_template::SLATE),
+                                                                    );
+                                                                });
+                                                                ui.with_layout(
+                                                                    egui::Layout::right_to_left(egui::Align::Center),
+                                                                    |ui| {
+                                                                        if ui
+                                                                            .add(ui_template::outline_pill_button(
+                                                                                "connect",
+                                                                                egui::vec2(82.0, 30.0),
+                                                                            ))
+                                                                            .clicked()
+                                                                        {
+                                                                            connect_idx = Some(index);
+                                                                        }
+                                                                    },
+                                                                );
+                                                            });
+                                                        });
+                                                    ui.add_space(6.0);
+                                                }
+                                            });
+                                        if let Some(idx) = connect_idx {
+                                            self.selected = Some(idx);
+                                            if let Some(d) = self.devices.get(idx) {
+                                                self.width = d.beacon.width.max(320);
+                                                self.height = d.beacon.height.max(240);
+                                                self.orientation = d.beacon.orientation;
+                                            }
+                                            self.start_pairing();
+                                        }
+                                    }
 
-                    // ── Session Output & Diagnostics Card ──────────────────
-                    if let Some(session) = &self.session {
-                        theme::card_frame().show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new("Live Stream Telemetry")
-                                    .size(14.0)
-                                    .strong()
-                                    .color(theme::CYAN),
-                            );
-                            ui.add_space(6.0);
-                            theme::inset_frame().show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("session-log")
-                                    .max_height(110.0)
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        for line in session.recent(40) {
-                                            ui.monospace(line);
+                                    ui.add_space(10.0);
+                                    ui.horizontal(|ui| {
+                                        let toggle_lbl = if self.show_settings {
+                                            "▾ Stream settings & tools"
+                                        } else {
+                                            "▸ Stream settings & tools"
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(toggle_lbl)
+                                                        .size(12.5)
+                                                        .strong()
+                                                        .color(ui_template::BRAND_BLUE),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.show_settings = !self.show_settings;
                                         }
                                     });
-                            });
-                        });
-                        ui.add_space(12.0);
-                    }
 
-                    theme::card_frame().show(ui, |ui| {
-                        ui.collapsing("Windows Firewall Helper", |ui| {
-                            ui.label("Open UDP ports 9000, 9200, 9201 for EcConn:");
-                            ui.monospace(app_host::firewall_command());
-                            if ui.button("Run firewall helper").clicked() {
-                                self.firewall_output = Some(match app_host::add_firewall_rule() {
-                                    Ok(text) => text,
-                                    Err(err) => format!("{err:#}"),
-                                });
-                            }
-                            if let Some(output) = &self.firewall_output {
-                                ui.monospace(output);
+                                    if self.show_settings {
+                                        ui.add_space(6.0);
+                                        ui_template::soft_blue_card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                ui.checkbox(&mut self.use_virtual, "Virtual Extend");
+                                                ui.add_space(8.0);
+                                                ui.label("FPS");
+                                                ui.add(egui::DragValue::new(&mut self.fps).range(5..=120));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Resolution");
+                                                ui.add(egui::DragValue::new(&mut self.width).range(320..=3840));
+                                                ui.label("×");
+                                                ui.add(egui::DragValue::new(&mut self.height).range(240..=2160));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Rotate");
+                                                for value in [0u16, 90, 180, 270] {
+                                                    ui.selectable_value(&mut self.orientation, value, format!("{value}°"));
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Encoder");
+                                                for value in ["auto", "libx264", "nvenc", "qsv", "amf"] {
+                                                    ui.selectable_value(&mut self.encode_path, value.to_string(), value);
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Firewall helper").clicked() {
+                                                    self.firewall_output = Some(match app_host::add_firewall_rule() {
+                                                        Ok(text) => text,
+                                                        Err(err) => format!("{err:#}"),
+                                                    });
+                                                }
+                                                if let Some(out) = &self.firewall_output {
+                                                    ui.label(egui::RichText::new(out).size(10.5).color(ui_template::SLATE));
+                                                }
+                                            });
+                                        });
+                                    }
+
+                                    ui.add_space(12.0);
+                                    ui_template::draw_wifi_banner(ui);
+                                }
+                                AppMode::Receiver => unreachable!(),
                             }
                         });
-                        ui.add_space(4.0);
-                        ui.collapsing("Event Log", |ui| {
-                            theme::inset_frame().show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("event-log")
-                                    .max_height(130.0)
-                                    .stick_to_bottom(true)
-                                    .show(ui, |ui| {
-                                        for line in &self.log {
-                                            ui.monospace(line);
-                                        }
-                                    });
-                            });
+
+                        // ── Right Column: EcConn Hero Illustration ─────────
+                        cols[1].vertical_centered(|ui| {
+                            let show_wifi = !(self.mode == AppMode::Host && self.session.is_some());
+                            ui_template::draw_right_illustration(ui, show_wifi);
                         });
                     });
-                });
+                }
             });
+
+        if let Some(target) = switch_to {
+            self.switch_mode(target, &ctx);
+        }
 
         ctx.request_repaint_after(Duration::from_millis(200));
     }

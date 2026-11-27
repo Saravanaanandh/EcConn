@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+app-receiver = { path = "../app-receiver" }
 common = { path = "../common" }
 # GUI. `glow` is the lighter eframe backend; x11/wayland are no-ops on Windows.
 eframe = { version = "0.37", default-features = false, features = [

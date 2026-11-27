@@ -121,6 +121,11 @@ impl NetSender {
             loop {
                 match self.socket.recv_from(&mut control) {
                     Ok((len, from)) => {
+                        if &control[..len] == b"ECCONN_BYE" {
+                            println!("client disconnected (ECCONN_BYE) from {from}");
+                            input.release_all();
+                            return;
+                        }
                         if let Some(header) = FrameHeader::decode(&control[..len]) {
                             if header.is_keyframe_request() {
                                 keyframe_requests += 1;

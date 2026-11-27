@@ -67,6 +67,7 @@ name = "app-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "app-receiver",
  "common",
  "eframe",
  "mdns-sd",
