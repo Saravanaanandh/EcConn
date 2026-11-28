@@ -327,7 +327,9 @@ impl HostApp {
     fn stop_session(&mut self) {
         if let Some(device) = self.active_device.take() {
             if let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", 0)) {
-                let _ = sock.send_to(b"ECCONN_BYE", device.video_addr());
+                for _ in 0..3 {
+                    let _ = sock.send_to(b"ECCONN_BYE", device.video_addr());
+                }
             }
         }
         self.active_token = None;

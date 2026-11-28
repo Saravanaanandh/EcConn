@@ -603,9 +603,9 @@ impl VideoSession {
     /// paired token. Only called when the user enabled "Control host".
     pub fn mouse_move(&mut self, x: f32, y: f32) {
         if let Some(input) = &mut self.input {
-            let px = (x.clamp(0.0, 1.0) * (self.width.saturating_sub(1)) as f32) as u16;
-            let py = (y.clamp(0.0, 1.0) * (self.height.saturating_sub(1)) as f32) as u16;
-            let _ = input.mouse_move(px, py);
+            let nx = (x.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16;
+            let ny = (y.clamp(0.0, 1.0) * u16::MAX as f32).round() as u16;
+            let _ = input.mouse_move(nx, ny);
         }
     }
 

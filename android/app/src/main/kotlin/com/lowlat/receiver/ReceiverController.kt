@@ -320,12 +320,19 @@ class ReceiverController(
         val thread = Thread({
             val buf = ByteArray(VIDEO_BUF_SIZE)
             val packet = DatagramPacket(buf, buf.size)
+            try {
+                videoSocket?.soTimeout = 1000
+            } catch (_: Exception) {}
+            var receivedAnyVideo = false
+            var lastPacketAtMs = 0L
 
             while (running.get()) {
                 val socket = videoSocket ?: break
                 try {
                     packet.length = buf.size
                     socket.receive(packet)
+                    receivedAnyVideo = true
+                    lastPacketAtMs = System.currentTimeMillis()
 
                     if (currentHostAddress == null) {
                         currentHostAddress = packet.address
@@ -361,6 +368,15 @@ class ReceiverController(
                     if (drop.lostCurrent) {
                         requestKeyframe()
                     }
+                } catch (_: java.net.SocketTimeoutException) {
+                    if (receivedAnyVideo &&
+                        state == State.CONNECTED &&
+                        System.currentTimeMillis() - lastPacketAtMs >= 3000L
+                    ) {
+                        Log.i(TAG, "Stream timed out (host stopped)")
+                        receivedAnyVideo = false
+                        disconnect()
+                    }
                 } catch (e: Exception) {
                     if (!running.get()) break
                     Log.w(TAG, "Video receive error: ${e.message}")
@@ -372,16 +388,18 @@ class ReceiverController(
     }
 
     private fun handleDisplayConfig(config: InputMessages.DisplayConfig) {
-        if (config.width != videoWidth || config.height != videoHeight) {
-            videoWidth = config.width
-            videoHeight = config.height
-            Log.i(TAG, "Received DisplayConfig: ${videoWidth}x$videoHeight, orient=${config.orientation}")
-            decoder.configure(videoWidth, videoHeight)
+        val sizeChanged = config.width != videoWidth || config.height != videoHeight
+        videoWidth = config.width
+        videoHeight = config.height
+        frameAssembler.reset()
+        Log.i(TAG, "Received DisplayConfig: ${videoWidth}x$videoHeight, orient=${config.orientation}")
+        if (sizeChanged) {
             mainHandler.post {
                 onVideoSizeChanged?.invoke(videoWidth, videoHeight)
             }
-            requestKeyframe()
         }
+        lastKeyframeRequestAtMs = 0L
+        requestKeyframe()
     }
 
     fun requestKeyframe() {
@@ -487,13 +505,16 @@ class ReceiverController(
             Thread {
                 try {
                     val bye = "ECCONN_BYE".toByteArray(StandardCharsets.UTF_8)
-                    val pkt = DatagramPacket(bye, bye.size, hostAddr, Wire.CONTROL_PORT)
-                    controlSocket?.send(pkt)
+                    DatagramSocket().use { sock ->
+                        val pkt = DatagramPacket(bye, bye.size, hostAddr, Wire.CONTROL_PORT)
+                        for (i in 0 until 3) sock.send(pkt)
+                    }
                 } catch (_: Exception) {
                 }
             }.start()
         }
         sendReleaseAll()
+        frameAssembler.reset()
         currentHostAddress = null
         currentHostName = ""
         sessionToken = 0L

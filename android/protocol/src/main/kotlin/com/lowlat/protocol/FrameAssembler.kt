@@ -43,6 +43,13 @@ class FrameAssembler(
     val pendingFrames: Int
         get() = partials.size
 
+    /** Clear partial frames and frame-id history (used when host restarts stream). */
+    fun reset() {
+        partials.clear()
+        newestDone = null
+        awaitingKeyframe = true
+    }
+
     /**
      * Feed one datagram payload. Returns the assembled frame when the last
      * missing packet arrives, otherwise `null`.

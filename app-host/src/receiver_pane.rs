@@ -52,6 +52,7 @@ pub struct ReceiverPane {
     frame_total: u64,
     button_mask: u8,
     just_disconnected: bool,
+    last_mouse_pos: Option<egui::Pos2>,
 }
 
 impl ReceiverPane {
@@ -74,6 +75,7 @@ impl ReceiverPane {
             frame_total: 0,
             button_mask: 0,
             just_disconnected: false,
+            last_mouse_pos: None,
         }
     }
 
@@ -138,10 +140,13 @@ impl ReceiverPane {
     pub fn disconnect(&mut self, ctx: &egui::Context, why: &str) {
         if let Stage::Streaming { host_ip, .. } = self.stage {
             if let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", 0)) {
-                let _ = sock.send_to(b"ECCONN_BYE", (host_ip, 9000));
+                for _ in 0..3 {
+                    let _ = sock.send_to(b"ECCONN_BYE", (host_ip, 9000));
+                }
             }
             self.just_disconnected = true;
         }
+        self.last_mouse_pos = None;
         if let Some(mut session) = self.session.take() {
             session.release_all();
             session.stop();
@@ -445,16 +450,19 @@ impl ReceiverPane {
             );
             if self.control && response.hovered() {
                 if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                    if let Some(session) = &mut self.session {
-                        let x = (pos.x - rect.left()) / rect.width();
-                        let y = (pos.y - rect.top()) / rect.height();
-                        let (x, y) = match self.rotate % 360 {
-                            90 => (y, 1.0 - x),
-                            180 => (1.0 - x, 1.0 - y),
-                            270 => (1.0 - y, x),
-                            _ => (x, y),
-                        };
-                        session.mouse_move(x, y);
+                    if self.last_mouse_pos != Some(pos) {
+                        self.last_mouse_pos = Some(pos);
+                        if let Some(session) = &mut self.session {
+                            let x = (pos.x - rect.left()) / rect.width();
+                            let y = (pos.y - rect.top()) / rect.height();
+                            let (x, y) = match self.rotate % 360 {
+                                90 => (y, 1.0 - x),
+                                180 => (1.0 - x, 1.0 - y),
+                                270 => (1.0 - y, x),
+                                _ => (x, y),
+                            };
+                            session.mouse_move(x, y);
+                        }
                     }
                 }
                 let (mask, wheel) = ctx.input(|i| {

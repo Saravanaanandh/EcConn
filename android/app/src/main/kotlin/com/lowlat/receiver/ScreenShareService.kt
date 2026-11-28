@@ -213,6 +213,12 @@ class ScreenShareService : Service() {
                 try {
                     pkt.length = buf.size
                     sock.receive(pkt)
+                    if (pkt.length == 10 && String(pkt.data, pkt.offset, pkt.length, Charsets.UTF_8) == "ECCONN_BYE") {
+                        Log.i(TAG, "Client disconnected (ECCONN_BYE)")
+                        stopSharing("Client disconnected")
+                        stopSelf()
+                        break
+                    }
                     val hdr = FrameHeader.decode(pkt.data, pkt.offset, pkt.length) ?: continue
                     if (hdr.isKeyframeRequest()) {
                         requestSyncFrame()
@@ -361,6 +367,15 @@ class ScreenShareService : Service() {
     private fun stopSharing(reason: String?) {
         val wasRunning = running.getAndSet(false)
         isStreaming = false
+        val addr = destAddr
+        val sock = videoSocket
+        if (wasRunning && addr != null && sock != null) {
+            try {
+                val bye = "ECCONN_BYE".toByteArray(Charsets.UTF_8)
+                val pkt = DatagramPacket(bye, bye.size, addr, destPort)
+                for (i in 0 until 3) sock.send(pkt)
+            } catch (_: Throwable) {}
+        }
         try { virtualDisplay?.release() } catch (_: Throwable) {}
         virtualDisplay = null
         try { encoder?.stop() } catch (_: Throwable) {}

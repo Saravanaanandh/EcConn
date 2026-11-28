@@ -175,6 +175,7 @@ impl Receiver {
         let mut datagram = [0u8; 2048];
         // We join mid-GOP at best: ask for a keyframe right away.
         self.request_keyframe();
+        let mut last_packet_at: Option<Instant> = None;
 
         while self.running.load(Ordering::Relaxed) {
             match self.socket.recv_from(&mut datagram) {
@@ -183,6 +184,7 @@ impl Receiver {
                         self.running.store(false, Ordering::Relaxed);
                         break;
                     }
+                    last_packet_at = Some(Instant::now());
                     self.handle_datagram(&datagram[..len], decoder);
                 }
                 Err(err)
@@ -196,7 +198,15 @@ impl Receiver {
                             // That is not fatal for a stream socket.
                             | std::io::ErrorKind::ConnectionReset
                             | std::io::ErrorKind::ConnectionRefused
-                    ) => {}
+                    ) =>
+                {
+                    if let Some(at) = last_packet_at {
+                        if at.elapsed() >= Duration::from_secs(3) {
+                            self.running.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
                 Err(err) => {
                     eprintln!("receive failed: {err}");
                     break;
@@ -220,6 +230,7 @@ impl Receiver {
             if let Some((msg, _, _)) = common::input_msg_decode(payload) {
                 if msg == common::InputMsg::DisplayConfig {
                     if let Some((w, h, orient, rot)) = common::display_config_decode(payload) {
+                        self.newest_done = None;
                         if w != self.width || h != self.height {
                             println!("client: server display config changed to {w}x{h} (orientation {orient}°, rotation {rot})");
                             if let Err(err) = decoder.reset(w, h) {

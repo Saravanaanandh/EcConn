@@ -2,7 +2,7 @@
 ; Bundles unified EcConn.exe (Host + Receiver) and server.exe (DXGI + Virtual Display)
 
 #define MyAppName "EcConn"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "EcConn"
 #define MyAppExeName "EcConn.exe"
 
